@@ -38,9 +38,29 @@
 
   const clamp = (value, min = -1, max = 1) => Math.max(min, Math.min(max, value));
 
+  const normalizeTelemetry = (payload) => ({
+    type: "telemetry",
+    timestamp: typeof payload.timestamp === "number" ? payload.timestamp : Date.now(),
+    battery_capacity: Number.isFinite(payload.battery_capacity) ? payload.battery_capacity : 0,
+    power_consumption: Number.isFinite(payload.power_consumption) ? payload.power_consumption : 0,
+    imu_angle: Number.isFinite(payload.imu_angle) ? payload.imu_angle : 0,
+    last_linear: Number.isFinite(payload.last_linear) ? payload.last_linear : 0,
+    last_angular: Number.isFinite(payload.last_angular) ? payload.last_angular : 0,
+  });
+
   function App() {
     const [connected, setConnected] = React.useState(false);
     const [joystickStatus, setJoystickStatus] = React.useState("loading");
+    const [activeTab, setActiveTab] = React.useState("slam");
+    const [telemetry, setTelemetry] = React.useState({
+      type: "telemetry",
+      timestamp: Date.now(),
+      battery_capacity: 85.5,
+      power_consumption: 12.4,
+      imu_angle: 0.2,
+      last_linear: 0,
+      last_angular: 0,
+    });
     const joystickRef = React.useRef(null);
     const wsRef = React.useRef(null);
     const latestRef = React.useRef({ x: 0, y: 0 });
@@ -94,6 +114,20 @@
         ws.addEventListener("open", () => {
           setConnected(true);
           reconnectRef.current.attempts = 0;
+        });
+
+        ws.addEventListener("message", (event) => {
+          if (!event.data) {
+            return;
+          }
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload && payload.type === "telemetry") {
+              setTelemetry(normalizeTelemetry(payload));
+            }
+          } catch (error) {
+            return;
+          }
         });
 
         ws.addEventListener("close", () => {
@@ -178,6 +212,29 @@
       };
     }, [joystickStatus, sendPayload]);
 
+    React.useEffect(() => {
+      const interval = window.setInterval(() => {
+        setTelemetry((current) => ({
+          ...current,
+          timestamp: Date.now(),
+        }));
+      }, 1000);
+      return () => window.clearInterval(interval);
+    }, []);
+
+    const renderTabButton = (id, label) =>
+      e(
+        "button",
+        {
+          type: "button",
+          className: activeTab === id ? "tab-button active" : "tab-button",
+          onClick: () => setActiveTab(id),
+        },
+        label
+      );
+
+    const telemetryJson = JSON.stringify(telemetry, null, 2);
+
     // Phase 3 hook: replace the stage placeholder with SLAM and vision widgets.
     return e(
       "div",
@@ -205,14 +262,96 @@
         { className: "stage" },
         e(
           "div",
-          { className: "stage-placeholder" },
-          e("div", { className: "stage-title" }, "SLAM/Vision Feed Offline"),
-          e(
-            "div",
-            { className: "stage-subtitle" },
-            "Will replace this panel with map tiles, camera streams, or 3D views later."
-          )
-        )
+          { className: "tabs" },
+          e("div", { className: "tabs-label" }, "Views"),
+          renderTabButton("slam", "SLAM + Vision"),
+          renderTabButton("telemetry", "Telemetry")
+        ),
+        activeTab === "slam"
+          ? e(
+              "div",
+              { className: "stage-placeholder" },
+              e("div", { className: "stage-title" }, "SLAM/Vision Feed Offline"),
+              e(
+                "div",
+                { className: "stage-subtitle" },
+                "Will replace this panel with map tiles, camera streams, or 3D views later."
+              )
+            )
+          : e(
+              "div",
+              { className: "telemetry" },
+              e(
+                "div",
+                { className: "telemetry-grid" },
+                e(
+                  "div",
+                  { className: "gauge-card" },
+                  e("div", { className: "gauge-label" }, "Battery"),
+                  e(
+                    "div",
+                    {
+                      className: "gauge",
+                      style: {
+                        "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)),
+                      },
+                    },
+                    e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
+                  )
+                ),
+                e(
+                  "div",
+                  { className: "gauge-card" },
+                  e("div", { className: "gauge-label" }, "Power"),
+                  e(
+                    "div",
+                    {
+                      className: "gauge",
+                      style: {
+                        "--value": Math.max(0, Math.min(100, telemetry.power_consumption * 5)),
+                      },
+                    },
+                    e("div", { className: "gauge-value" }, `${telemetry.power_consumption.toFixed(1)} W`)
+                  )
+                ),
+                e(
+                  "div",
+                  { className: "gauge-card" },
+                  e("div", { className: "gauge-label" }, "IMU Angle"),
+                  e(
+                    "div",
+                    {
+                      className: "gauge",
+                      style: {
+                        "--value": Math.max(0, Math.min(100, (telemetry.imu_angle + 1) * 50)),
+                      },
+                    },
+                    e("div", { className: "gauge-value" }, `${telemetry.imu_angle.toFixed(2)} rad`)
+                  )
+                ),
+                e(
+                  "div",
+                  { className: "gauge-card" },
+                  e("div", { className: "gauge-label" }, "Velocity"),
+                  e(
+                    "div",
+                    {
+                      className: "gauge",
+                      style: {
+                        "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)),
+                      },
+                    },
+                    e("div", { className: "gauge-value" }, `${telemetry.last_linear.toFixed(2)} m/s`)
+                  )
+                )
+              ),
+              e(
+                "div",
+                { className: "telemetry-json" },
+                e("div", { className: "telemetry-title" }, "Raw Telemetry"),
+                e("pre", { className: "telemetry-code" }, telemetryJson)
+              )
+            )
       ),
       e(
         "aside",

@@ -80,6 +80,25 @@ class ConnectionManager:
                 for websocket in dead:
                     self._robot_clients.discard(websocket)
 
+    async def broadcast_to_ui(self, message: str) -> None:
+        async with self._lock:
+            targets = list(self._ui_clients)
+
+        if not targets:
+            return
+
+        dead = []
+        for websocket in targets:
+            try:
+                await websocket.send_text(message)
+            except Exception:
+                dead.append(websocket)
+
+        if dead:
+            async with self._lock:
+                for websocket in dead:
+                    self._ui_clients.discard(websocket)
+
 
 manager = ConnectionManager()
 
@@ -123,8 +142,16 @@ async def websocket_robot(websocket: WebSocket) -> None:
     try:
         while True:
             message = await websocket.receive_text()
-            _ = message
-            # Future hook: parse telemetry, IMU, battery, and SLAM updates here.
+            try:
+                payload = json.loads(message)
+            except json.JSONDecodeError:
+                continue
+
+            if payload.get("type") != "telemetry":
+                continue
+
+            # Forward telemetry updates to any connected UI dashboards.
+            await manager.broadcast_to_ui(json.dumps(payload))
     except WebSocketDisconnect:
         pass
     finally:
