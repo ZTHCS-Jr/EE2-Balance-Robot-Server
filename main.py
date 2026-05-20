@@ -99,6 +99,27 @@ class ConnectionManager:
                 for websocket in dead:
                     self._ui_clients.discard(websocket)
 
+    # the video byte broadcaster is now correctly inside the ConnectionManager class!
+    async def broadcast_bytes_to_ui(self, frame_bytes: bytes) -> None:
+        async with self._lock:
+            targets = list(self._ui_clients)
+
+        if not targets:
+            return
+
+        dead = []
+        for websocket in targets:
+            try:
+                # Send as binary frame directly to the browser
+                await websocket.send_bytes(frame_bytes)
+            except Exception:
+                dead.append(websocket)
+
+        if dead:
+            async with self._lock:
+                for websocket in dead:
+                    self._ui_clients.discard(websocket)
+
 
 manager = ConnectionManager()
 
@@ -114,7 +135,6 @@ async def websocket_ui(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 continue
 
-            # Future: accept SLAM, vision, or telemetry control messages here.
             if payload.get("type") != "joystick":
                 continue
 
@@ -132,7 +152,6 @@ async def websocket_ui(websocket: WebSocket) -> None:
     finally:
         await manager.remove_ui(websocket)
         if await manager.ui_count() == 0:
-            # Safety stop: if no UI clients remain, force zero velocity.
             await manager.broadcast_to_robots(format_command(0.0, 0.0))
 
 
@@ -150,7 +169,6 @@ async def websocket_robot(websocket: WebSocket) -> None:
             if payload.get("type") != "telemetry":
                 continue
 
-            # Forward telemetry updates to any connected UI dashboards.
             await manager.broadcast_to_ui(json.dumps(payload))
     except WebSocketDisconnect:
         pass
@@ -158,7 +176,23 @@ async def websocket_robot(websocket: WebSocket) -> None:
         await manager.remove_robot(websocket)
 
 
+# the video endpoint now catches the bytes and uses the manager properly
+@app.websocket("/ws/video")
+async def websocket_video(websocket: WebSocket) -> None:
+    await websocket.accept()
+    try:
+        while True:
+            # Receive raw binary JPEG bytes from the Pi
+            frame_bytes = await websocket.receive_bytes()
+            
+            # Instantly broadcast those bytes to the UI browser connection
+            await manager.broadcast_bytes_to_ui(frame_bytes)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[SERVER ERROR] Video socket dropped: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

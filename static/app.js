@@ -52,6 +52,7 @@
     const [connected, setConnected] = React.useState(false);
     const [joystickStatus, setJoystickStatus] = React.useState("loading");
     const [activeTab, setActiveTab] = React.useState("slam");
+    const [hasVideoStream, setHasVideoStream] = React.useState(false);
     const [telemetry, setTelemetry] = React.useState({
       type: "telemetry",
       timestamp: Date.now(),
@@ -61,8 +62,10 @@
       last_linear: 0,
       last_angular: 0,
     });
+    
     const joystickRef = React.useRef(null);
     const wsRef = React.useRef(null);
+    const videoImgRef = React.useRef(null);
     const latestRef = React.useRef({ x: 0, y: 0 });
     const sendTimerRef = React.useRef(null);
     const reconnectRef = React.useRef({ timer: null, attempts: 0 });
@@ -120,6 +123,26 @@
           if (!event.data) {
             return;
           }
+
+          // BINARY VIDEO HANDLER
+          // If the payload arrives as a binary, map into video placeholder
+          if (event.data instanceof Blob) {
+            if (activeTab === "slam" && videoImgRef.current) {
+              setHasVideoStream(true);
+              const url = URL.createObjectURL(event.data);
+              const oldUrl = videoImgRef.current.src;
+              
+              videoImgRef.current.src = url;
+              
+              // Clear old tracking cache
+              if (oldUrl && oldUrl.startsWith("blob:")) {
+                URL.revokeObjectURL(oldUrl);
+              }
+            }
+            return;
+          }
+
+          // json telemetry
           try {
             const payload = JSON.parse(event.data);
             if (payload && payload.type === "telemetry") {
@@ -132,6 +155,7 @@
 
         ws.addEventListener("close", () => {
           setConnected(false);
+          setHasVideoStream(false);
           scheduleReconnect();
         });
 
@@ -150,7 +174,7 @@
           wsRef.current.close();
         }
       };
-    }, []);
+    }, [activeTab]);
 
     React.useEffect(() => {
       if (!joystickRef.current || joystickStatus !== "ready" || !window.nipplejs) {
@@ -228,14 +252,16 @@
         {
           type: "button",
           className: activeTab === id ? "tab-button active" : "tab-button",
-          onClick: () => setActiveTab(id),
+          onClick: () => {
+            if (id !== "slam") setHasVideoStream(false);
+            setActiveTab(id);
+          },
         },
         label
       );
 
     const telemetryJson = JSON.stringify(telemetry, null, 2);
 
-    // Phase 3 hook: replace the stage placeholder with SLAM and vision widgets.
     return e(
       "div",
       { className: "app" },
@@ -270,12 +296,23 @@
         activeTab === "slam"
           ? e(
               "div",
-              { className: "stage-placeholder" },
-              e("div", { className: "stage-title" }, "SLAM/Vision Feed Offline"),
+              { className: "stage-placeholder", style: { position: "relative", overflow: "hidden" } },
+              e("img", {
+                ref: videoImgRef,
+                style: {
+                  display: hasVideoStream ? "block" : "none",
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  borderRadius: "12px"
+                },
+                alt: "Pi Camera Feed"
+              }),
               e(
                 "div",
-                { className: "stage-subtitle" },
-                "Will replace this panel with map tiles, camera streams, or 3D views later."
+                { style: { display: hasVideoStream ? "none" : "block", textAlign: "center" } },
+                e("div", { className: "stage-title" }, "Pi NoIR Camera Feed Offline"),
+                e("div", { className: "stage-subtitle" }, "Awaiting video processing frame tokens from Pi 3...")
               )
             )
           : e(
