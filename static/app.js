@@ -79,20 +79,12 @@
 
     React.useEffect(() => {
       let cancelled = false;
-
       loadNipple().then((ready) => {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         setJoystickStatus(ready ? "ready" : "missing");
-        if (!ready) {
-          console.warn("Nipple.js failed to load. Offline users can add /static/vendor/nipplejs.min.js.");
-        }
+        if (!ready) console.warn("Nipple.js failed to load.");
       });
-
-      return () => {
-        cancelled = true;
-      };
+      return () => { cancelled = true; };
     }, []);
 
     React.useEffect(() => {
@@ -112,6 +104,7 @@
         const scheme = window.location.protocol === "https:" ? "wss" : "ws";
         const url = `${scheme}://${window.location.host}${WS_PATH}`;
         const ws = new WebSocket(url);
+        ws.binaryType = "blob";
         wsRef.current = ws;
 
         ws.addEventListener("open", () => {
@@ -120,14 +113,11 @@
         });
 
         ws.addEventListener("message", (event) => {
-          if (!event.data) {
-            return;
-          }
+          console.log("INCOMING DATA TYPE:", typeof event.data, event.data);
+          if (!event.data) return;
 
-          // BINARY VIDEO HANDLER
-          // If the payload arrives as a binary, map into video placeholder
           if (event.data instanceof Blob) {
-            if (activeTab === "slam" && videoImgRef.current) {
+            if (videoImgRef.current) {
               setHasVideoStream(true);
               const url = URL.createObjectURL(event.data);
               const oldUrl = videoImgRef.current.src;
@@ -142,7 +132,6 @@
             return;
           }
 
-          // json telemetry
           try {
             const payload = JSON.parse(event.data);
             if (payload && payload.type === "telemetry") {
@@ -174,11 +163,11 @@
           wsRef.current.close();
         }
       };
-    }, [activeTab]);
+    }, []);
 
     React.useEffect(() => {
       if (!joystickRef.current || joystickStatus !== "ready" || !window.nipplejs) {
-        return undefined;
+        return;
       }
 
       const maxRadius = JOYSTICK_SIZE / 2;
@@ -211,9 +200,7 @@
       };
 
       const handleMove = (_event, data) => {
-        if (!data || !data.vector) {
-          return;
-        }
+        if (!data || !data.vector) return;
         const force = Math.min(data.distance / maxRadius, 1);
         const angular = clamp(data.vector.x * force, -1, 1);
         const linear = clamp(-data.vector.y * force, -1, 1);
@@ -238,10 +225,7 @@
 
     React.useEffect(() => {
       const interval = window.setInterval(() => {
-        setTelemetry((current) => ({
-          ...current,
-          timestamp: Date.now(),
-        }));
+        setTelemetry((current) => ({ ...current, timestamp: Date.now() }));
       }, 1000);
       return () => window.clearInterval(interval);
     }, []);
@@ -252,10 +236,7 @@
         {
           type: "button",
           className: activeTab === id ? "tab-button active" : "tab-button",
-          onClick: () => {
-            if (id !== "slam") setHasVideoStream(false);
-            setActiveTab(id);
-          },
+          onClick: () => setActiveTab(id),
         },
         label
       );
@@ -327,12 +308,7 @@
                   e("div", { className: "gauge-label" }, "Battery"),
                   e(
                     "div",
-                    {
-                      className: "gauge",
-                      style: {
-                        "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)),
-                      },
-                    },
+                    { className: "gauge", style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)) } },
                     e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
                   )
                 ),
@@ -372,12 +348,7 @@
                   e("div", { className: "gauge-label" }, "Velocity"),
                   e(
                     "div",
-                    {
-                      className: "gauge",
-                      style: {
-                        "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)),
-                      },
-                    },
+                    { className: "gauge", style: { "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)) } },
                     e("div", { className: "gauge-value" }, `${telemetry.last_linear.toFixed(2)} m/s`)
                   )
                 )
@@ -398,11 +369,7 @@
           { className: "panel-card" },
           e("h2", null, "Control Panel"),
           e("p", { className: "panel-muted" }, "Drive control via virtual joystick."),
-          e(
-            "div",
-            { className: "joystick-shell" },
-            e("div", { className: "joystick-zone", ref: joystickRef })
-          ),
+          e("div", { className: "joystick-shell" }, e("div", { className: "joystick-zone", ref: joystickRef })),
           e(
             "div",
             { className: "panel-footer" },
@@ -410,7 +377,7 @@
               ? "Release the stick to stop."
               : joystickStatus === "loading"
               ? "Loading joystick..."
-              : "Joystick library unavailable. If offline, add /static/vendor/nipplejs.min.js."
+              : "Joystick library unavailable."
           )
         )
       )
