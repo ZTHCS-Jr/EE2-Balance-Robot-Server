@@ -247,6 +247,24 @@
       "div",
       { className: "app" },
       e(
+        "svg",
+        { 
+          width:0, height:0, 
+          style: {position: "absolute", visibility: "hidden"},
+        },
+        e(
+          "filter",
+          {id:"noir-matrix"},
+          e(
+            "feColorMatrix",
+            {
+              type: "matrix",
+              values:"0.02 0 0 0 0   0 0.8 0 0 0   0 0 0.3 0 0   0 0 0 1 0"
+            }
+          )
+        )
+      ),
+      e(
         "header",
         { className: "header" },
         e(
@@ -285,7 +303,8 @@
                   width: "100%",
                   height: "100%",
                   objectFit: "contain",
-                  borderRadius: "12px"
+                  borderRadius: "12px",
+                filter: "url(#noir-matrix)" 
                 },
                 alt: "Pi Camera Feed"
               }),
