@@ -249,7 +249,7 @@ async def api_enroll(name: str = Form(...), image: UploadFile = File(...)) -> di
 
 @app.get("/api/people")
 async def api_people() -> dict:
-    people = await asyncio.to_thread(FastAPI.list_people)
+    people = await asyncio.to_thread(faceAPI.list_people)
     return {"people": people, "init_error": faceAPI.init_error()}
 
 

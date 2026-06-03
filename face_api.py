@@ -15,7 +15,7 @@ import config
 from insightface.app import FaceAnalysis
 from face_db import FaceDB
 
-class faceAPI():
+class FaceAPI():
     def __init__(self):
         # A single shared lock around all InsightFace calls. The underlying ONNX
         # session is not guaranteed to be thread-safe for concurrent .get() calls,
@@ -23,6 +23,7 @@ class faceAPI():
         self._lock = threading.Lock()
         self._app = None
         self._db: Optional[FaceDB] = None
+        self._init_error: Optional[str] = None
 
     def build_face_app(self):
         # Loads MODEL_name (insight face buffalo_l) for the detection and recognition (RetinaFace and ArcFace)
@@ -39,16 +40,21 @@ class faceAPI():
 
     def _ensure_ready(self) -> bool:
         # Initialise the model and database
-        global _app, _db
-        if _app is not None and _db is not None:
+        if self._app is not None and self._db is not None:
             return True
         try:
-            _app = self.build_face_app()
-            _db = FaceDB.load()
+            self._app = self.build_face_app()
+            self._db = FaceDB.load()
         except Exception as exc:  # Raise exception if insightface load fails
-            print(f"[face_api] InsightFace unavailable")
+            self._init_error = str(exc)
+            print(f"[face_api] InsightFace unavailable: {exc}")
             return False
+        self._init_error = None
         return True
+
+    def init_error(self) -> Optional[str]:
+        # Last initialisation failure message, or None if the engine is ready.
+        return self._init_error
 
 
 
@@ -62,11 +68,11 @@ class faceAPI():
         if img is None:
             return []
         with self._lock:
-            faces = _app.get(img)
+            faces = self._app.get(img)
             results = []
             # Each result is {"bbox": [x1,y1,x2,y2], "name": str|None, "score": float}
             for face in faces:
-                name, score = _db.identify(face.normed_embedding)
+                name, score = self._db.identify(face.normed_embedding)
                 b = face.bbox.astype(int).tolist()
                 results.append({"bbox": b, "name": name, "score": float(score)})
         return results
@@ -80,14 +86,14 @@ class faceAPI():
         arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if img is None:
-            return False, "Could not decode image", _db.count_for(name) if _db else 0
+            return False, "Could not decode image", self._db.count_for(name) if self._db else 0
         with self._lock:
-            face = self.largest_face(_app.get(img))
+            face = self.largest_face(self._app.get(img))
             if face is None:
-                return False, "No face detected", _db.count_for(name)
-            _db.add(name, face.normed_embedding)
-            _db.save()
-            return True, "ok", _db.count_for(name)
+                return False, "No face detected", self._db.count_for(name)
+            self._db.add(name, face.normed_embedding)
+            self._db.save()
+            return True, "ok", self._db.count_for(name)
 
 
     # Display at the bottom of the people registered
@@ -96,7 +102,7 @@ class faceAPI():
         if not self._ensure_ready():
             return []
         with self._lock:
-            return [{"name": n, "count": _db.count_for(n)} for n in _db.people()]
+            return [{"name": n, "count": self._db.count_for(n)} for n in self._db.people()]
 
 
     def delete_person(self, name: str) -> Tuple[bool, List[str]]:
@@ -104,7 +110,11 @@ class faceAPI():
         if not self._ensure_ready():
             return False, []
         with self._lock:
-            existed = name in _db.labels
-            _db.remove(name)
-            _db.save()
-            return existed, _db.people()
+            existed = name in self._db.labels
+            self._db.remove(name)
+            self._db.save()
+            return existed, self._db.people()
+
+
+# Shared singleton used across the app. Import this, not the class.
+faceAPI = FaceAPI()

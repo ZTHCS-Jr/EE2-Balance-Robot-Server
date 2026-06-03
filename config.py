@@ -18,4 +18,4 @@ MATCH_THRESHOLD = 0.5
 
 # CPU optimisation for the live loop
 # Detect and recognise every N frames to save resources
-DETECT_EVERY_N = 3
+DETECT_EVERY_N = 1
