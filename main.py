@@ -4,9 +4,12 @@ import asyncio
 import json
 from typing import Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
+import config
+from face_api import faceAPI
 
 app = FastAPI(title="Robot Registration MVP")
 
@@ -177,20 +180,85 @@ async def websocket_robot(websocket: WebSocket) -> None:
 
 
 # the video endpoint now catches the bytes and uses the manager properly
+_detect_logged_once = False
+
+
 @app.websocket("/ws/video")
 async def websocket_video(websocket: WebSocket) -> None:
     await websocket.accept()
+    frame_idx = 0
+    # Mutable single-element flag so the background detection task can clear it.
+    detect_busy = [False]
     try:
         while True:
             # Receive raw binary JPEG bytes from the Pi
             frame_bytes = await websocket.receive_bytes()
-            
+
             # Instantly broadcast those bytes to the UI browser connection
             await manager.broadcast_bytes_to_ui(frame_bytes)
+
+            # Every Nth frame, fire detection on a worker thread. Skip if a
+            # previous detection is still running so we never queue work up.
+            if frame_idx % config.DETECT_EVERY_N == 0 and not detect_busy[0]:
+                detect_busy[0] = True
+                asyncio.create_task(_run_detection(frame_bytes, frame_idx, detect_busy))
+            frame_idx += 1
     except WebSocketDisconnect:
         pass
     except Exception as e:
         print(f"[SERVER ERROR] Video socket dropped: {e}")
+
+
+async def _run_detection(frame_bytes: bytes, frame_idx: int, busy_flag: list) -> None:
+    global _detect_logged_once
+    try:
+        faces = await asyncio.to_thread(faceAPI.detect, frame_bytes)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[face_api] detect failed: {exc}")
+        busy_flag[0] = False
+        return
+    finally:
+        # Always clear the flag, even if broadcast below raises, so detection
+        # keeps firing on subsequent frames.
+        pass
+    if not _detect_logged_once:
+        print(f"[face_api] first detection complete: {len(faces)} face(s) on frame {frame_idx}")
+        _detect_logged_once = True
+    try:
+        await manager.broadcast_to_ui(json.dumps({
+            "type": "detections",
+            "frame_idx": frame_idx,
+            "faces": faces,
+        }))
+    finally:
+        busy_flag[0] = False
+
+
+# Face recognition REST api
+@app.post("/api/enroll")
+async def api_enroll(name: str = Form(...), image: UploadFile = File(...)) -> dict:
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    data = await image.read()
+    ok, message, total = await asyncio.to_thread(faceAPI.enroll_image, name, data)
+    if not ok:
+        raise HTTPException(status_code=422, detail={"message": message, "count": total})
+    return {"ok": True, "name": name, "count": total}
+
+
+@app.get("/api/people")
+async def api_people() -> dict:
+    people = await asyncio.to_thread(FastAPI.list_people)
+    return {"people": people, "init_error": faceAPI.init_error()}
+
+
+@app.delete("/api/people/{name}")
+async def api_delete_person(name: str) -> dict:
+    existed, remaining = await asyncio.to_thread(faceAPI.delete_person, name)
+    if not existed:
+        raise HTTPException(status_code=404, detail="person not found")
+    return {"ok": True, "remaining": remaining}
 
 
 if __name__ == "__main__":

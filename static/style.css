@@ -306,6 +306,222 @@ body {
   color: var(--muted);
 }
 
+.stage-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  flex: 1;
+}
+
+.detection-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.enrol-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  background: #fdfefe;
+}
+
+.enrol-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 1.4fr;
+  gap: 16px;
+}
+
+.enrol-camera {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.enrol-video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 12px;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+.enrol-camera-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.enrol-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.enrol-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.enrol-field input {
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--text);
+}
+
+.enrol-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.enrol-angles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.enrol-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.enrol-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.enrol-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.enrol-count {
+  background: var(--accent);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  min-width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+}
+
+.enrol-status {
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.enrol-status.ok {
+  border-color: var(--success);
+  color: var(--success);
+  background: rgba(46, 155, 89, 0.08);
+}
+
+.enrol-status.error {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(214, 69, 69, 0.08);
+}
+
+.enrol-status.info {
+  color: var(--muted);
+}
+
+.people-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.people-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.people-empty {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.people-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.people-items li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #f3f5f7;
+  border: 1px solid var(--border);
+}
+
+.people-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.people-count {
+  flex: 1;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.people-delete {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--danger);
+  background: #ffffff;
+  color: var(--danger);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.people-delete:hover {
+  background: var(--danger);
+  color: #ffffff;
+}
+
 @media (max-width: 980px) {
   .app {
     grid-template-areas:
@@ -320,5 +536,9 @@ body {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
+  }
+
+  .enrol-grid {
+    grid-template-columns: 1fr;
   }
 }

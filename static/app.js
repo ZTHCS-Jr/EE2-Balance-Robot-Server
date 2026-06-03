@@ -48,11 +48,23 @@
     last_angular: Number.isFinite(payload.last_angular) ? payload.last_angular : 0,
   });
 
+  const ANGLES = [
+    { key: "front", label: "Front" },
+    { key: "left", label: "Left" },
+    { key: "right", label: "Right" },
+  ];
+
   function App() {
     const [connected, setConnected] = React.useState(false);
     const [joystickStatus, setJoystickStatus] = React.useState("loading");
     const [activeTab, setActiveTab] = React.useState("slam");
     const [hasVideoStream, setHasVideoStream] = React.useState(false);
+    const [detections, setDetections] = React.useState([]);
+    const [enrolName, setEnrolName] = React.useState("");
+    const [angleCounts, setAngleCounts] = React.useState({ front: 0, left: 0, right: 0 });
+    const [people, setPeople] = React.useState([]);
+    const [enrolStatus, setEnrolStatus] = React.useState({ kind: "idle", text: "" });
+    const [webcamStatus, setWebcamStatus] = React.useState("idle");
     const [telemetry, setTelemetry] = React.useState({
       type: "telemetry",
       timestamp: Date.now(),
@@ -62,10 +74,13 @@
       last_linear: 0,
       last_angular: 0,
     });
-    
+
     const joystickRef = React.useRef(null);
     const wsRef = React.useRef(null);
     const videoImgRef = React.useRef(null);
+    const webcamVideoRef = React.useRef(null);
+    const captureCanvasRef = React.useRef(null);
+    const webcamStreamRef = React.useRef(null);
     const latestRef = React.useRef({ x: 0, y: 0 });
     const sendTimerRef = React.useRef(null);
     const reconnectRef = React.useRef({ timer: null, attempts: 0 });
@@ -74,6 +89,19 @@
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(payload));
+      }
+    }, []);
+
+    const refreshPeople = React.useCallback(async () => {
+      try {
+        const response = await fetch("/api/people");
+        if (!response.ok) return;
+        const data = await response.json();
+        if (Array.isArray(data.people)) {
+          setPeople(data.people);
+        }
+      } catch (err) {
+        // ignore - panel just shows empty
       }
     }, []);
 
@@ -113,7 +141,6 @@
         });
 
         ws.addEventListener("message", (event) => {
-          console.log("INCOMING DATA TYPE:", typeof event.data, event.data);
           if (!event.data) return;
 
           if (event.data instanceof Blob) {
@@ -121,10 +148,9 @@
               setHasVideoStream(true);
               const url = URL.createObjectURL(event.data);
               const oldUrl = videoImgRef.current.src;
-              
+
               videoImgRef.current.src = url;
-              
-              // Clear old tracking cache
+
               if (oldUrl && oldUrl.startsWith("blob:")) {
                 URL.revokeObjectURL(oldUrl);
               }
@@ -134,8 +160,11 @@
 
           try {
             const payload = JSON.parse(event.data);
-            if (payload && payload.type === "telemetry") {
+            if (!payload || !payload.type) return;
+            if (payload.type === "telemetry") {
               setTelemetry(normalizeTelemetry(payload));
+            } else if (payload.type === "detections") {
+              setDetections(Array.isArray(payload.faces) ? payload.faces : []);
             }
           } catch (error) {
             return;
@@ -145,6 +174,7 @@
         ws.addEventListener("close", () => {
           setConnected(false);
           setHasVideoStream(false);
+          setDetections([]);
           scheduleReconnect();
         });
 
@@ -230,6 +260,120 @@
       return () => window.clearInterval(interval);
     }, []);
 
+    // Start / stop the laptop webcam stream when the Face Recognition tab is active.
+    React.useEffect(() => {
+      if (activeTab !== "face") {
+        if (webcamStreamRef.current) {
+          webcamStreamRef.current.getTracks().forEach((t) => t.stop());
+          webcamStreamRef.current = null;
+        }
+        setWebcamStatus("idle");
+        return undefined;
+      }
+      let cancelled = false;
+      setWebcamStatus("loading");
+      navigator.mediaDevices
+        .getUserMedia({ video: { width: 640, height: 480 }, audio: false })
+        .then((stream) => {
+          if (cancelled) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          webcamStreamRef.current = stream;
+          if (webcamVideoRef.current) {
+            webcamVideoRef.current.srcObject = stream;
+          }
+          setWebcamStatus("ready");
+        })
+        .catch((err) => {
+          console.warn("getUserMedia failed:", err);
+          if (!cancelled) setWebcamStatus("denied");
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [activeTab]);
+
+    // Refresh the saved-people list when entering the Face tab.
+    React.useEffect(() => {
+      if (activeTab === "face") {
+        refreshPeople();
+      }
+    }, [activeTab, refreshPeople]);
+
+    const captureAngle = React.useCallback(
+      async (angleKey) => {
+        const name = enrolName.trim();
+        if (!name) {
+          setEnrolStatus({ kind: "error", text: "Enter a name first." });
+          return;
+        }
+        const video = webcamVideoRef.current;
+        const canvas = captureCanvasRef.current;
+        if (!video || !canvas || video.videoWidth === 0) {
+          setEnrolStatus({ kind: "error", text: "Webcam not ready yet." });
+          return;
+        }
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise((resolve) =>
+          canvas.toBlob(resolve, "image/jpeg", 0.92)
+        );
+        if (!blob) {
+          setEnrolStatus({ kind: "error", text: "Could not capture frame." });
+          return;
+        }
+        const form = new FormData();
+        form.append("name", name);
+        form.append("image", blob, `${name}-${angleKey}.jpg`);
+        setEnrolStatus({ kind: "info", text: "Uploading..." });
+        try {
+          const response = await fetch("/api/enroll", { method: "POST", body: form });
+          if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            const msg = detail?.detail?.message || detail?.detail || `Enrol failed (${response.status})`;
+            setEnrolStatus({ kind: "error", text: String(msg) });
+            return;
+          }
+          const result = await response.json();
+          setAngleCounts((current) => ({ ...current, [angleKey]: current[angleKey] + 1 }));
+          setEnrolStatus({
+            kind: "ok",
+            text: `Saved ${angleKey} for ${name} (${result.count} total).`,
+          });
+          refreshPeople();
+        } catch (err) {
+          setEnrolStatus({ kind: "error", text: "Network error during enrol." });
+        }
+      },
+      [enrolName, refreshPeople]
+    );
+
+    const deletePerson = React.useCallback(
+      async (name) => {
+        if (!window.confirm(`Delete all enrolment data for ${name}?`)) return;
+        try {
+          const response = await fetch(`/api/people/${encodeURIComponent(name)}`, {
+            method: "DELETE",
+          });
+          if (!response.ok) {
+            setEnrolStatus({ kind: "error", text: `Delete failed (${response.status})` });
+            return;
+          }
+          setEnrolStatus({ kind: "ok", text: `Removed ${name}.` });
+          if (enrolName.trim() === name) {
+            setAngleCounts({ front: 0, left: 0, right: 0 });
+          }
+          refreshPeople();
+        } catch (err) {
+          setEnrolStatus({ kind: "error", text: "Network error during delete." });
+        }
+      },
+      [enrolName, refreshPeople]
+    );
+
     const renderTabButton = (id, label) =>
       e(
         "button",
@@ -242,6 +386,246 @@
       );
 
     const telemetryJson = JSON.stringify(telemetry, null, 2);
+
+    const showVideo = activeTab === "slam" || activeTab === "face";
+    const videoStage = e(
+      "div",
+      {
+        className: "stage-placeholder",
+        style: { position: "relative", overflow: "hidden" },
+      },
+      e("img", {
+        ref: videoImgRef,
+        style: {
+          display: hasVideoStream ? "block" : "none",
+          width: "100%",
+          height: "100%",
+          objectFit: "contain",
+          borderRadius: "12px",
+        },
+        alt: "Pi Camera Feed",
+      }),
+      // Detection overlay - only on the Face Recognition tab.
+      activeTab === "face" && hasVideoStream && videoImgRef.current
+        ? e(
+            "svg",
+            {
+              className: "detection-overlay",
+              viewBox: `0 0 ${videoImgRef.current.naturalWidth || 1} ${videoImgRef.current.naturalHeight || 1}`,
+              preserveAspectRatio: "xMidYMid meet",
+            },
+            detections.map((det, idx) => {
+              const [x1, y1, x2, y2] = det.bbox;
+              const matched = det.name !== null && det.name !== undefined;
+              const colour = matched ? "#2e9b59" : "#d64545";
+              const label = matched
+                ? `${det.name} (${det.score.toFixed(2)})`
+                : `Unknown (${det.score.toFixed(2)})`;
+              return e(
+                "g",
+                { key: idx },
+                e("rect", {
+                  x: x1,
+                  y: y1,
+                  width: Math.max(1, x2 - x1),
+                  height: Math.max(1, y2 - y1),
+                  fill: "none",
+                  stroke: colour,
+                  strokeWidth: 3,
+                }),
+                e(
+                  "text",
+                  {
+                    x: x1,
+                    y: Math.max(y1 - 6, 14),
+                    fill: colour,
+                    fontSize: 18,
+                    fontWeight: 600,
+                    style: { paintOrder: "stroke", stroke: "#ffffff", strokeWidth: 3 },
+                  },
+                  label
+                )
+              );
+            })
+          )
+        : null,
+      e(
+        "div",
+        {
+          style: {
+            display: hasVideoStream ? "none" : "block",
+            textAlign: "center",
+            color: "var(--muted)",
+          },
+        },
+        e("div", { className: "stage-title" }, "Pi NoIR Camera Feed Offline"),
+        e("div", { className: "stage-subtitle" }, "Awaiting video processing frame tokens from Pi 3...")
+      )
+    );
+
+    const enrolPanel = e(
+      "div",
+      { className: "enrol-panel" },
+      e(
+        "div",
+        { className: "enrol-grid" },
+        e(
+          "div",
+          { className: "enrol-camera" },
+          e("video", {
+            ref: webcamVideoRef,
+            autoPlay: true,
+            muted: true,
+            playsInline: true,
+            className: "enrol-video",
+          }),
+          e("canvas", { ref: captureCanvasRef, style: { display: "none" } }),
+          e(
+            "div",
+            { className: "enrol-camera-status" },
+            webcamStatus === "loading" && "Requesting webcam...",
+            webcamStatus === "denied" && "Webcam permission denied or unavailable.",
+            webcamStatus === "ready" && "Look at the laptop webcam, then capture each angle."
+          )
+        ),
+        e(
+          "div",
+          { className: "enrol-controls" },
+          e(
+            "label",
+            { className: "enrol-field" },
+            e("span", null, "Name"),
+            e("input", {
+              type: "text",
+              value: enrolName,
+              onChange: (ev) => setEnrolName(ev.target.value),
+              placeholder: "e.g. Alice",
+            })
+          ),
+          e(
+            "div",
+            { className: "enrol-angles" },
+            ANGLES.map((a) =>
+              e(
+                "button",
+                {
+                  key: a.key,
+                  type: "button",
+                  className: "enrol-button",
+                  onClick: () => captureAngle(a.key),
+                  disabled: webcamStatus !== "ready",
+                },
+                `Capture ${a.label}`,
+                e("span", { className: "enrol-count" }, angleCounts[a.key])
+              )
+            )
+          ),
+          enrolStatus.text
+            ? e("div", { className: `enrol-status ${enrolStatus.kind}` }, enrolStatus.text)
+            : null
+        )
+      ),
+      e(
+        "div",
+        { className: "people-list" },
+        e("div", { className: "people-title" }, "Saved people"),
+        people.length === 0
+          ? e("div", { className: "people-empty" }, "No one enrolled yet.")
+          : e(
+              "ul",
+              { className: "people-items" },
+              people.map((p) =>
+                e(
+                  "li",
+                  { key: p.name },
+                  e("span", { className: "people-name" }, p.name),
+                  e("span", { className: "people-count" }, `${p.count} sample${p.count === 1 ? "" : "s"}`),
+                  e(
+                    "button",
+                    {
+                      type: "button",
+                      className: "people-delete",
+                      onClick: () => deletePerson(p.name),
+                    },
+                    "Delete"
+                  )
+                )
+              )
+            )
+      )
+    );
+
+    const stageContent = showVideo
+      ? e(
+          "div",
+          { className: "stage-content" },
+          videoStage,
+          activeTab === "face" ? enrolPanel : null
+        )
+      : e(
+          "div",
+          { className: "telemetry" },
+          e(
+            "div",
+            { className: "telemetry-grid" },
+            e(
+              "div",
+              { className: "gauge-card" },
+              e("div", { className: "gauge-label" }, "Battery"),
+              e(
+                "div",
+                { className: "gauge", style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)) } },
+                e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
+              )
+            ),
+            e(
+              "div",
+              { className: "gauge-card" },
+              e("div", { className: "gauge-label" }, "Power"),
+              e(
+                "div",
+                {
+                  className: "gauge",
+                  style: {
+                    "--value": Math.max(0, Math.min(100, telemetry.power_consumption * 5)),
+                  },
+                },
+                e("div", { className: "gauge-value" }, `${telemetry.power_consumption.toFixed(1)} W`)
+              )
+            ),
+            e(
+              "div",
+              { className: "gauge-card" },
+              e("div", { className: "gauge-label" }, "IMU Angle"),
+              e(
+                "div",
+                {
+                  className: "gauge",
+                  style: {
+                    "--value": Math.max(0, Math.min(100, (telemetry.imu_angle + 1) * 50)),
+                  },
+                },
+                e("div", { className: "gauge-value" }, `${telemetry.imu_angle.toFixed(2)} rad`)
+              )
+            ),
+            e(
+              "div",
+              { className: "gauge-card" },
+              e("div", { className: "gauge-label" }, "Velocity"),
+              e(
+                "div",
+                { className: "gauge", style: { "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)) } },
+                e("div", { className: "gauge-value" }, `${telemetry.last_linear.toFixed(2)} m/s`)
+              )
+            )
+          ),
+          e(
+            "div",
+            { className: "telemetry-json" },
+            e("div", { className: "telemetry-title" }, "Raw Telemetry"),
+            e("pre", { className: "telemetry-code" }, telemetryJson)
+          )
+        );
 
     return e(
       "div",
@@ -272,94 +656,10 @@
           { className: "tabs" },
           e("div", { className: "tabs-label" }, "Views"),
           renderTabButton("slam", "SLAM + Vision"),
+          renderTabButton("face", "Face Recognition"),
           renderTabButton("telemetry", "Telemetry")
         ),
-        activeTab === "slam"
-          ? e(
-              "div",
-              { className: "stage-placeholder", style: { position: "relative", overflow: "hidden" } },
-              e("img", {
-                ref: videoImgRef,
-                style: {
-                  display: hasVideoStream ? "block" : "none",
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "contain",
-                  borderRadius: "12px"
-                },
-                alt: "Pi Camera Feed"
-              }),
-              e(
-                "div",
-                { style: { display: hasVideoStream ? "none" : "block", textAlign: "center" } },
-                e("div", { className: "stage-title" }, "Pi NoIR Camera Feed Offline"),
-                e("div", { className: "stage-subtitle" }, "Awaiting video processing frame tokens from Pi 3...")
-              )
-            )
-          : e(
-              "div",
-              { className: "telemetry" },
-              e(
-                "div",
-                { className: "telemetry-grid" },
-                e(
-                  "div",
-                  { className: "gauge-card" },
-                  e("div", { className: "gauge-label" }, "Battery"),
-                  e(
-                    "div",
-                    { className: "gauge", style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)) } },
-                    e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
-                  )
-                ),
-                e(
-                  "div",
-                  { className: "gauge-card" },
-                  e("div", { className: "gauge-label" }, "Power"),
-                  e(
-                    "div",
-                    {
-                      className: "gauge",
-                      style: {
-                        "--value": Math.max(0, Math.min(100, telemetry.power_consumption * 5)),
-                      },
-                    },
-                    e("div", { className: "gauge-value" }, `${telemetry.power_consumption.toFixed(1)} W`)
-                  )
-                ),
-                e(
-                  "div",
-                  { className: "gauge-card" },
-                  e("div", { className: "gauge-label" }, "IMU Angle"),
-                  e(
-                    "div",
-                    {
-                      className: "gauge",
-                      style: {
-                        "--value": Math.max(0, Math.min(100, (telemetry.imu_angle + 1) * 50)),
-                      },
-                    },
-                    e("div", { className: "gauge-value" }, `${telemetry.imu_angle.toFixed(2)} rad`)
-                  )
-                ),
-                e(
-                  "div",
-                  { className: "gauge-card" },
-                  e("div", { className: "gauge-label" }, "Velocity"),
-                  e(
-                    "div",
-                    { className: "gauge", style: { "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)) } },
-                    e("div", { className: "gauge-value" }, `${telemetry.last_linear.toFixed(2)} m/s`)
-                  )
-                )
-              ),
-              e(
-                "div",
-                { className: "telemetry-json" },
-                e("div", { className: "telemetry-title" }, "Raw Telemetry"),
-                e("pre", { className: "telemetry-code" }, telemetryJson)
-              )
-            )
+        stageContent
       ),
       e(
         "aside",
