@@ -232,7 +232,7 @@
       const handleMove = (_event, data) => {
         if (!data || !data.vector) return;
         const force = Math.min(data.distance / maxRadius, 1);
-        const angular = clamp(data.vector.x * force, -1, 1);
+        const angular = clamp(-data.vector.x * force, -1, 1);  // nipplejs x is +right; negate so push-left = turn-left (CCW, REP-103)
         const linear = clamp(-data.vector.y * force, -1, 1);
         latestRef.current = { x: angular, y: linear };
       };
