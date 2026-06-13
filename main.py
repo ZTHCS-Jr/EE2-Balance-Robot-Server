@@ -13,7 +13,6 @@ from face_api import faceAPI
 
 app = FastAPI(title="Robot Registration MVP")
 
-# Static frontend assets live in /static.
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
@@ -101,8 +100,6 @@ class ConnectionManager:
             async with self._lock:
                 for websocket in dead:
                     self._ui_clients.discard(websocket)
-
-    # the video byte broadcaster is now correctly inside the ConnectionManager class!
     async def broadcast_bytes_to_ui(self, frame_bytes: bytes) -> None:
         async with self._lock:
             targets = list(self._ui_clients)
@@ -187,18 +184,12 @@ _detect_logged_once = False
 async def websocket_video(websocket: WebSocket) -> None:
     await websocket.accept()
     frame_idx = 0
-    # Mutable single-element flag so the background detection task can clear it.
     detect_busy = [False]
     try:
         while True:
-            # Receive raw binary JPEG bytes from the Pi
             frame_bytes = await websocket.receive_bytes()
 
-            # Instantly broadcast those bytes to the UI browser connection
             await manager.broadcast_bytes_to_ui(frame_bytes)
-
-            # Every Nth frame, fire detection on a worker thread. Skip if a
-            # previous detection is still running so we never queue work up.
             if frame_idx % config.DETECT_EVERY_N == 0 and not detect_busy[0]:
                 detect_busy[0] = True
                 asyncio.create_task(_run_detection(frame_bytes, frame_idx, detect_busy))

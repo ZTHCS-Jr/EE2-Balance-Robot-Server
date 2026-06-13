@@ -115,6 +115,4 @@ class FaceAPI():
             self._db.save()
             return existed, self._db.people()
 
-
-# Shared singleton used across the app. Import this, not the class.
 faceAPI = FaceAPI()
