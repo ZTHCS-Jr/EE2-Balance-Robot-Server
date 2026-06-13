@@ -57,7 +57,7 @@
   function App() {
     const [connected, setConnected] = React.useState(false);
     const [joystickStatus, setJoystickStatus] = React.useState("loading");
-    const [activeTab, setActiveTab] = React.useState("slam");
+    const [activeTab, setActiveTab] = React.useState("vision");
     const [hasVideoStream, setHasVideoStream] = React.useState(false);
     const [detections, setDetections] = React.useState([]);
     const [enrolName, setEnrolName] = React.useState("");
@@ -74,6 +74,7 @@
       last_linear: 0,
       last_angular: 0,
     });
+    const [mapSrc, setMapSrc]=React.useState(null);
 
     const joystickRef = React.useRef(null);
     const wsRef = React.useRef(null);
@@ -165,6 +166,9 @@
               setTelemetry(normalizeTelemetry(payload));
             } else if (payload.type === "detections") {
               setDetections(Array.isArray(payload.faces) ? payload.faces : []);
+            }
+            else if (payload.type === "map"){
+              setMapSrc(payload.image);
             }
           } catch (error) {
             return;
@@ -388,80 +392,6 @@
     const telemetryJson = JSON.stringify(telemetry, null, 2);
 
     const showVideo = activeTab === "slam" || activeTab === "face";
-    const videoStage = e(
-      "div",
-      {
-        className: "stage-placeholder",
-        style: { position: "relative", overflow: "hidden" },
-      },
-      e("img", {
-        ref: videoImgRef,
-        style: {
-          display: hasVideoStream ? "block" : "none",
-          width: "100%",
-          height: "100%",
-          objectFit: "contain",
-          borderRadius: "12px",
-        },
-        alt: "Pi Camera Feed",
-      }),
-      // Detection overlay - only on the Face Recognition tab.
-      activeTab === "face" && hasVideoStream && videoImgRef.current
-        ? e(
-            "svg",
-            {
-              className: "detection-overlay",
-              viewBox: `0 0 ${videoImgRef.current.naturalWidth || 1} ${videoImgRef.current.naturalHeight || 1}`,
-              preserveAspectRatio: "xMidYMid meet",
-            },
-            detections.map((det, idx) => {
-              const [x1, y1, x2, y2] = det.bbox;
-              const matched = det.name !== null && det.name !== undefined;
-              const colour = matched ? "#2e9b59" : "#d64545";
-              const label = matched
-                ? `${det.name} (${det.score.toFixed(2)})`
-                : `Unknown (${det.score.toFixed(2)})`;
-              return e(
-                "g",
-                { key: idx },
-                e("rect", {
-                  x: x1,
-                  y: y1,
-                  width: Math.max(1, x2 - x1),
-                  height: Math.max(1, y2 - y1),
-                  fill: "none",
-                  stroke: colour,
-                  strokeWidth: 3,
-                }),
-                e(
-                  "text",
-                  {
-                    x: x1,
-                    y: Math.max(y1 - 6, 14),
-                    fill: colour,
-                    fontSize: 18,
-                    fontWeight: 600,
-                    style: { paintOrder: "stroke", stroke: "#ffffff", strokeWidth: 3 },
-                  },
-                  label
-                )
-              );
-            })
-          )
-        : null,
-      e(
-        "div",
-        {
-          style: {
-            display: hasVideoStream ? "none" : "block",
-            textAlign: "center",
-            color: "var(--muted)",
-          },
-        },
-        e("div", { className: "stage-title" }, "Pi NoIR Camera Feed Offline"),
-        e("div", { className: "stage-subtitle" }, "Awaiting video processing frame tokens from Pi 3...")
-      )
-    );
 
     const enrolPanel = e(
       "div",
@@ -562,79 +492,120 @@
     };
     const batteryColor=getBatteryColor(telemetry.battery_capacity);
 
-    const stageContent = showVideo
-      ? e(
-          "div",
-          { className: "stage-content" },
-          videoStage,
-          activeTab === "face" ? enrolPanel : null
-        )
-      : e(
-          "div",
-          { className: "telemetry" },
-          e(
-            "div",
-            { className: "telemetry-grid" },
-            e(
-              "div",
-              { className: "gauge-card" },
-              e("div", { className: "gauge-label" }, "Battery"),
-              e(
-                "div",
-                { className: "gauge", 
-                  style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)), 
-                    "--gauge-color": batteryColor } },
-                e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
-              )
-            ),
-            e(
-              "div",
-              { className: "gauge-card" },
-              e("div", { className: "gauge-label" }, "Power"),
-              e(
-                "div",
-                {
-                  className: "gauge",
-                  style: {
-                    "--value": Math.max(0, Math.min(100, telemetry.power_consumption * 5)),
-                  },
-                },
-                e("div", { className: "gauge-value" }, `${telemetry.power_consumption.toFixed(1)} W`)
-              )
-            ),
-            e(
-              "div",
-              { className: "gauge-card" },
-              e("div", { className: "gauge-label" }, "IMU Tilt Angle"),
-              e(
-                "div",
-                {
-                  className: "gauge",
-                  style: {
-                    "--value": Math.max(0, Math.min(100, (telemetry.imu_angle + 1) * 50)),
-                  },
-                },
-                e("div", { className: "gauge-value" }, `${telemetry.imu_angle.toFixed(2)} rad`)
-              )
-            ),
-            e(
-              "div",
-              { className: "gauge-card" },
-              e("div", { className: "gauge-label" }, "Velocity"),
-              e(
-                "div",
-                { className: "gauge", style: { "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)) } },
-                e("div", { className: "gauge-value" }, `${telemetry.last_linear.toFixed(2)} m/s`)
-              )
+    const showVision = activeTab === "vision" || activeTab === "face";
+    const showSlam = activeTab === "slam";
+    const showTelemetry = activeTab === "telemetry";
+
+    const visionView = e(
+      "div",
+      { className: "stage-content", style: { display: showVision ? "flex" : "none" } },
+      e(
+        "div",
+        { className: "stream-container" },
+        e("img", {
+          ref: videoImgRef,
+          className: "stream-media",
+          style: { display: hasVideoStream ? "block" : "none" },
+          alt: "Pi Camera Feed",
+        }),
+        activeTab === "face" && hasVideoStream && videoImgRef.current
+          ? e(
+              "svg",
+              {
+                className: "detection-overlay",
+                viewBox: `0 0 ${videoImgRef.current.naturalWidth || 1} ${videoImgRef.current.naturalHeight || 1}`,
+                preserveAspectRatio: "xMidYMid meet",
+              },
+              detections.map((det, idx) => {
+                const [x1, y1, x2, y2] = det.bbox;
+                const matched = det.name !== null && det.name !== undefined;
+                const colour = matched ? "#2e9b59" : "#d64545";
+                const label = matched
+                  ? `${det.name} (${det.score.toFixed(2)})`
+                  : `Unknown (${det.score.toFixed(2)})`;
+                return e(
+                  "g",
+                  { key: idx },
+                  e("rect", {
+                    x: x1, 
+                    y: y1, 
+                    width: Math.max(1, x2 - x1), 
+                    height: Math.max(1, y2 - y1), 
+                    fill: "none", stroke: colour, 
+                    strokeWidth: 3 }),
+                  e(
+                    "text", 
+                    { 
+                      x: x1, 
+                      y: Math.max(y1 - 6, 14), 
+                      fill: colour, 
+                      fontSize: 18, 
+                      fontWeight: 600, 
+                      className: "detection-text" 
+                    }, 
+                    label
+                  )
+                );
+              })
             )
-          ),
-          e(
-            "div",
-            { className: "telemetry-json" },
-            e("div", { className: "telemetry-title" }, "Raw Telemetry"),
-            e("pre", { className: "telemetry-code" }, telemetryJson)
+          : null,
+        !hasVideoStream ? e("div", { className: "slam-placeholder" }, "Camera Offline") : null
+      ),
+      activeTab === "face" ? enrolPanel : null
+    );
+
+    const slamView = e(
+      "div",
+      { className: "stage-content", style: { display: showSlam ? "flex" : "none" } },
+      e(
+        "div",
+        { className: "stream-container" },
+        mapSrc
+          ? e("img", { src: mapSrc, className: "stream-media slam-map-image" })
+          : e("div", { className: "slam-placeholder" }, "Waiting for /map topic")
+      )
+    );
+
+    const telemetryView = e(
+      "div",
+      { className: "telemetry", style: { display: showTelemetry ? "flex" : "none" } },
+      e(
+        "div",
+        { className: "telemetry-grid" },
+        e("div", { className: "gauge-card" },
+          e("div", { className: "gauge-label" }, "Battery"),
+          e("div", { className: "gauge", style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)), "--gauge-color": batteryColor } },
+            e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
           )
-        );
+        ),
+        e("div", { className: "gauge-card" },
+          e("div", { className: "gauge-label" }, "Power"),
+          e("div", { className: "gauge", style: { "--value": Math.max(0, Math.min(100, telemetry.power_consumption * 5)) } },
+            e("div", { className: "gauge-value" }, `${telemetry.power_consumption.toFixed(1)} W`)
+          )
+        ),
+        e("div", { className: "gauge-card" },
+          e("div", { className: "gauge-label" }, "IMU Tilt Angle"),
+          e("div", { className: "gauge", style: { "--value": Math.max(0, Math.min(100, (telemetry.imu_angle + 1) * 50)) } },
+            e("div", { className: "gauge-value" }, `${telemetry.imu_angle.toFixed(2)} rad`)
+          )
+        ),
+        e("div", { className: "gauge-card" },
+          e("div", { className: "gauge-label" }, "Velocity"),
+          e("div", { className: "gauge", style: { "--value": Math.max(0, Math.min(100, Math.abs(telemetry.last_linear) * 100)) } },
+            e("div", { className: "gauge-value" }, `${telemetry.last_linear.toFixed(2)} m/s`)
+          )
+        )
+      ),
+      e(
+        "div",
+        { className: "telemetry-json" },
+        e("div", { className: "telemetry-title" }, "Raw Telemetry"),
+        e("pre", { className: "telemetry-code" }, telemetryJson)
+      )
+    );
+
+    const stageContent = e(React.Fragment, null, visionView, slamView, telemetryView);
 
     return e(
       "div",
@@ -664,7 +635,8 @@
           "div",
           { className: "tabs" },
           e("div", { className: "tabs-label" }, "Views"),
-          renderTabButton("slam", "SLAM + Vision"),
+          renderTabButton("vision", "Vision Feed"),
+          renderTabButton("slam", "SLAM Map"),
           renderTabButton("face", "Face Recognition"),
           renderTabButton("telemetry", "Telemetry")
         ),

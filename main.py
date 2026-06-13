@@ -1,4 +1,13 @@
 from __future__ import annotations
+import threading
+import base64
+import numpy as np
+import cv2
+
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import OccupancyGrid
+
 
 import asyncio
 import json
@@ -251,6 +260,64 @@ async def api_delete_person(name: str) -> dict:
         raise HTTPException(status_code=404, detail="person not found")
     return {"ok": True, "remaining": remaining}
 
+main_loop = None
+
+class MapSubscriber(Node):
+    def __init__(self):
+        super().__init__('web_map_subscriber')
+        # subscribe to map topic
+        self.subscription = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+
+    def map_callback(self, msg):
+        # connvert the ROS array to a 2D numpy array
+        data = np.array(msg.data, dtype=np.int8)
+        width, height = msg.info.width, msg.info.height
+        grid = data.reshape((height, width))
+
+        # Map values to greyscale colors
+        # -1 (Unknown) -> 127 (Grey)
+        # 0 (Free Space) -> 255 (White)
+        # 100 (Wall/Occupied) -> 0 (Black)
+        img = np.zeros((height, width), dtype=np.uint8)
+        img[grid == -1] = 127
+        img[grid == 0] = 255
+        img[grid == 100] = 0
+
+        # orientate SLAM map
+        img = cv2.flip(img, 0)
+
+        # compress into a PNG
+        _, buffer = cv2.imencode('.png', img)
+        b64_str = base64.b64encode(buffer).decode('utf-8')
+
+        payload = {
+            "type": "map",
+            "image": f"data:image/png;base64,{b64_str}"
+        }
+
+        if main_loop and main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast_to_ui(json.dumps(payload)),
+                main_loop
+            )
+
+def ros_spin_thread():
+    rclpy.init()
+    node = MapSubscriber()
+    try:
+        rclpy.spin(node)
+    except Exception as e:
+        print(f"[ROS 2] Map Node stopped: {e}")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+# start node in background when FastAPI boots
+@app.on_event("startup")
+async def startup_event():
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+    threading.Thread(target=ros_spin_thread, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
