@@ -199,7 +199,7 @@ body {
   width: 96px;
   height: 96px;
   border-radius: 50%;
-  background: conic-gradient(var(--accent) calc(var(--value) * 1%), #e6ebef 0);
+  background: conic-gradient(var(--gauge-color, var(--accent)) calc(var(--value) * 1%), #e6ebef 0);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -555,6 +555,13 @@
       )
     );
 
+    const getBatteryColor = (soc)=>{
+      if (soc<=25) return "var(--danger)";
+      if (soc<=50) return "#f59f00"
+      return "var(--accent)";
+    };
+    const batteryColor=getBatteryColor(telemetry.battery_capacity);
+
     const stageContent = showVideo
       ? e(
           "div",
@@ -574,7 +581,9 @@
               e("div", { className: "gauge-label" }, "Battery"),
               e(
                 "div",
-                { className: "gauge", style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)) } },
+                { className: "gauge", 
+                  style: { "--value": Math.max(0, Math.min(100, telemetry.battery_capacity)), 
+                    "--gauge-color": batteryColor } },
                 e("div", { className: "gauge-value" }, `${telemetry.battery_capacity.toFixed(1)}%`)
               )
             ),
@@ -596,7 +605,7 @@
             e(
               "div",
               { className: "gauge-card" },
-              e("div", { className: "gauge-label" }, "IMU Angle"),
+              e("div", { className: "gauge-label" }, "IMU Tilt Angle"),
               e(
                 "div",
                 {
