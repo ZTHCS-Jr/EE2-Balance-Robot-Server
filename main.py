@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Set
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -12,6 +13,8 @@ import config
 from face_api import faceAPI
 
 app = FastAPI(title="Robot Registration MVP")
+
+LATENCY_PROBE = True  
 
 # Static frontend assets live in /static.
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -138,6 +141,11 @@ async def websocket_ui(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 continue
 
+            if LATENCY_PROBE and payload.get("type") == "ping":
+                # Latency probe: relay straight to the robot, which echoes a pong.
+                await manager.broadcast_to_robots(json.dumps(payload))
+                continue
+
             if payload.get("type") != "joystick":
                 continue
 
@@ -169,7 +177,8 @@ async def websocket_robot(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 continue
 
-            if payload.get("type") != "telemetry":
+            allowed = ("telemetry", "pong") if LATENCY_PROBE else ("telemetry",)
+            if payload.get("type") not in allowed:
                 continue
 
             await manager.broadcast_to_ui(json.dumps(payload))
@@ -193,6 +202,7 @@ async def websocket_video(websocket: WebSocket) -> None:
         while True:
             # Receive raw binary JPEG bytes from the Pi
             frame_bytes = await websocket.receive_bytes()
+            recv_t = time.perf_counter()
 
             # Instantly broadcast those bytes to the UI browser connection
             await manager.broadcast_bytes_to_ui(frame_bytes)
@@ -201,7 +211,7 @@ async def websocket_video(websocket: WebSocket) -> None:
             # previous detection is still running so we never queue work up.
             if frame_idx % config.DETECT_EVERY_N == 0 and not detect_busy[0]:
                 detect_busy[0] = True
-                asyncio.create_task(_run_detection(frame_bytes, frame_idx, detect_busy))
+                asyncio.create_task(_run_detection(frame_bytes, frame_idx, detect_busy, recv_t))
             frame_idx += 1
     except WebSocketDisconnect:
         pass
@@ -209,10 +219,12 @@ async def websocket_video(websocket: WebSocket) -> None:
         print(f"[SERVER ERROR] Video socket dropped: {e}")
 
 
-async def _run_detection(frame_bytes: bytes, frame_idx: int, busy_flag: list) -> None:
+async def _run_detection(frame_bytes: bytes, frame_idx: int, busy_flag: list, recv_t: float | None = None) -> None:
     global _detect_logged_once
     try:
+        t0 = time.perf_counter()
         faces = await asyncio.to_thread(faceAPI.detect, frame_bytes)
+        detect_ms = (time.perf_counter() - t0) * 1000.0
     except Exception as exc:  # noqa: BLE001
         print(f"[face_api] detect failed: {exc}")
         busy_flag[0] = False
@@ -224,12 +236,18 @@ async def _run_detection(frame_bytes: bytes, frame_idx: int, busy_flag: list) ->
     if not _detect_logged_once:
         print(f"[face_api] first detection complete: {len(faces)} face(s) on frame {frame_idx}")
         _detect_logged_once = True
+    payload = {
+        "type": "detections",
+        "frame_idx": frame_idx,
+        "faces": faces,
+    }
+    if LATENCY_PROBE:
+        # detect_ms = model compute; pipeline_ms = frame arrival -> result sent
+        payload["detect_ms"] = round(detect_ms, 1)
+        if recv_t is not None:
+            payload["pipeline_ms"] = round((time.perf_counter() - recv_t) * 1000.0, 1)
     try:
-        await manager.broadcast_to_ui(json.dumps({
-            "type": "detections",
-            "frame_idx": frame_idx,
-            "faces": faces,
-        }))
+        await manager.broadcast_to_ui(json.dumps(payload))
     finally:
         busy_flag[0] = False
 

@@ -3,6 +3,7 @@
   const SEND_INTERVAL_MS = 40;
   const JOYSTICK_SIZE = 180;
   const WS_PATH = "/ws/ui";
+  const LATENCY_PROBE = true;   // set false to disable the round-trip latency probe
   const NIPPLE_SOURCES = [
     "https://cdn.jsdelivr.net/npm/nipplejs@0.9.0/dist/nipplejs.min.js",
     "https://unpkg.com/nipplejs@0.9.0/dist/nipplejs.min.js",
@@ -56,6 +57,8 @@
 
   function App() {
     const [connected, setConnected] = React.useState(false);
+    const [latencyMs, setLatencyMs] = React.useState(null);
+    const [detectMs, setDetectMs] = React.useState(null);
     const [joystickStatus, setJoystickStatus] = React.useState("loading");
     const [activeTab, setActiveTab] = React.useState("slam");
     const [hasVideoStream, setHasVideoStream] = React.useState(false);
@@ -83,6 +86,7 @@
     const webcamStreamRef = React.useRef(null);
     const latestRef = React.useRef({ x: 0, y: 0 });
     const sendTimerRef = React.useRef(null);
+    const pingTimerRef = React.useRef(null);
     const reconnectRef = React.useRef({ timer: null, attempts: 0 });
 
     const sendPayload = React.useCallback((payload) => {
@@ -138,6 +142,16 @@
         ws.addEventListener("open", () => {
           setConnected(true);
           reconnectRef.current.attempts = 0;
+          // Round-trip latency probe: ping once a second, timed against the
+          // browser's own clock when the matching pong returns.
+          if (LATENCY_PROBE) {
+            if (pingTimerRef.current) clearInterval(pingTimerRef.current);
+            pingTimerRef.current = window.setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "ping", t0: performance.now() }));
+              }
+            }, 1000);
+          }
         });
 
         ws.addEventListener("message", (event) => {
@@ -165,6 +179,17 @@
               setTelemetry(normalizeTelemetry(payload));
             } else if (payload.type === "detections") {
               setDetections(Array.isArray(payload.faces) ? payload.faces : []);
+              if (LATENCY_PROBE && typeof payload.detect_ms === "number") {
+                setDetectMs(payload.detect_ms);
+                console.log(
+                  `[latency] face detect ${payload.detect_ms} ms` +
+                    (typeof payload.pipeline_ms === "number" ? ` (pipeline ${payload.pipeline_ms} ms)` : "")
+                );
+              }
+            } else if (LATENCY_PROBE && payload.type === "pong") {
+              const rtt = performance.now() - payload.t0;
+              setLatencyMs(rtt);
+              console.log(`[latency] RTT ${rtt.toFixed(1)} ms (TX/RX ~ ${(rtt / 2).toFixed(1)} ms each)`);
             }
           } catch (error) {
             return;
@@ -175,6 +200,12 @@
           setConnected(false);
           setHasVideoStream(false);
           setDetections([]);
+          if (pingTimerRef.current) {
+            clearInterval(pingTimerRef.current);
+            pingTimerRef.current = null;
+          }
+          setLatencyMs(null);
+          setDetectMs(null);
           scheduleReconnect();
         });
 
@@ -188,6 +219,9 @@
       return () => {
         if (reconnectRef.current.timer) {
           clearTimeout(reconnectRef.current.timer);
+        }
+        if (pingTimerRef.current) {
+          clearInterval(pingTimerRef.current);
         }
         if (wsRef.current) {
           wsRef.current.close();
@@ -645,7 +679,19 @@
           e("span", {
             className: connected ? "status-dot connected" : "status-dot",
           }),
-          e("span", { className: "status-label" }, connected ? "Connected" : "Disconnected")
+          e(
+            "span",
+            { className: "status-label" },
+            connected
+              ? [
+                  "Connected",
+                  latencyMs != null ? `RTT ${latencyMs.toFixed(0)} ms` : null,
+                  detectMs != null ? `FR ${detectMs.toFixed(0)} ms` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : "Disconnected"
+          )
         )
       ),
       e(
