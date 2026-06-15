@@ -157,7 +157,6 @@
           e("p", null, "Robot's map with other attendee's last-seen location")
         ),
         e("div", { className: "map-wrapper", style: { textAlign: "center", marginTop: "30px" } },
-          e("h3", null, "Live Robot Map"),
           mapSrc 
             ? e("img", { 
                 src: mapSrc, 
