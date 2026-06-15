@@ -236,7 +236,7 @@
       const handleMove = (_event, data) => {
         if (!data || !data.vector) return;
         const force = Math.min(data.distance / maxRadius, 1);
-        const angular = clamp(-data.vector.x * force, -1, 1);  // nipplejs x is +right; negate so push-left = turn-left (CCW, REP-103)
+        const angular = clamp(data.vector.x * force, -1, 1);  // nipplejs x is +right; negate so push-left = turn-left (CCW, REP-103)
         const linear = clamp(-data.vector.y * force, -1, 1);
         latestRef.current = { x: angular, y: linear };
       };
@@ -322,57 +322,76 @@
         canvas.height = video.videoHeight;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const blob = await new Promise((resolve) =>
-          canvas.toBlob(resolve, "image/jpeg", 0.92)
-        );
-        if (!blob) {
-          setEnrolStatus({ kind: "error", text: "Could not capture frame." });
-          return;
-        }
-        const form = new FormData();
-        form.append("name", name);
-        form.append("image", blob, `${name}-${angleKey}.jpg`);
-        setEnrolStatus({ kind: "info", text: "Uploading..." });
+        
+        // Convert canvas directly to Base64
+        const base64Image = canvas.toDataURL("image/jpeg", 0.92);
+
+        setEnrolStatus({ kind: "info", text: "Upload to AWS DB" });
+        
         try {
-          const response = await fetch("/api/enroll", { method: "POST", body: form });
+          const API_KEY = "harrisonjr12"; 
+          const AWS_API_URL = "https://iwt4lg01s6.execute-api.us-east-1.amazonaws.com/enroll";
+
+          const response = await fetch(AWS_API_URL, { 
+            method: "POST", 
+            headers: { 
+              "Content-Type": "application/json",
+              "robot-api-key": API_KEY
+            },
+            body: JSON.stringify({
+              name: `${name}-${angleKey}`, 
+              image: base64Image
+            })
+          });
+
           if (!response.ok) {
             const detail = await response.json().catch(() => ({}));
-            const msg = detail?.detail?.message || detail?.detail || `Enrol failed (${response.status})`;
+            const msg = detail?.message || `AWS Enrol failed (${response.status})`;
             setEnrolStatus({ kind: "error", text: String(msg) });
             return;
           }
-          const result = await response.json();
+          
           setAngleCounts((current) => ({ ...current, [angleKey]: current[angleKey] + 1 }));
-          setEnrolStatus({
-            kind: "ok",
-            text: `Saved ${angleKey} for ${name} (${result.count} total).`,
-          });
-          refreshPeople();
+          setEnrolStatus({ kind: "ok", text: `Saved ${angleKey} for ${name} to AWS DB` });
+          
+          setTimeout(refreshPeople, 1000);
         } catch (err) {
-          setEnrolStatus({ kind: "error", text: "Network error during enrol." });
+          setEnrolStatus({ kind: "error", text: "Network error connecting to AWS" });
         }
       },
       [enrolName, refreshPeople]
-    );
+    ); 
 
     const deletePerson = React.useCallback(
       async (name) => {
-        if (!window.confirm(`Delete all enrolment data for ${name}?`)) return;
+        if (!window.confirm(`Delete all enrolment data for ${name} from database?`)) return;
+        
         try {
-          const response = await fetch(`/api/people/${encodeURIComponent(name)}`, {
+          const API_KEY = "harrisonjr12"; 
+          const AWS_API_URL = "https://iwt4lg01s6.execute-api.us-east-1.amazonaws.com/enroll";
+          
+          const response = await fetch(AWS_API_URL, {
             method: "DELETE",
+            headers: { 
+              "Content-Type": "application/json",
+              "robot-api-key": API_KEY
+            },
+            body: JSON.stringify({ name: name })
           });
+          
           if (!response.ok) {
             setEnrolStatus({ kind: "error", text: `Delete failed (${response.status})` });
             return;
           }
-          setEnrolStatus({ kind: "ok", text: `Removed ${name}.` });
+          
+          setEnrolStatus({ kind: "ok", text: `Removed ${name} from database` });
           if (enrolName.trim() === name) {
             setAngleCounts({ front: 0, left: 0, right: 0 });
           }
-          refreshPeople();
+          setPeople((currentPeople)=>currentPeople.filter((p)=>p.name!==name));
+          setTimeout(refreshPeople, 12000);
         } catch (err) {
-          setEnrolStatus({ kind: "error", text: "Network error during delete." });
+          setEnrolStatus({ kind: "error", text: "Network error during delete" });
         }
       },
       [enrolName, refreshPeople]
@@ -414,8 +433,8 @@
             "div",
             { className: "enrol-camera-status" },
             webcamStatus === "loading" && "Requesting webcam...",
-            webcamStatus === "denied" && "Webcam permission denied or unavailable.",
-            webcamStatus === "ready" && "Look at the laptop webcam, then capture each angle."
+            webcamStatus === "denied" && "Webcam permission denied or unavailable",
+            webcamStatus === "ready" && "Look at the laptop webcam, then capture each angle"
           )
         ),
         e(

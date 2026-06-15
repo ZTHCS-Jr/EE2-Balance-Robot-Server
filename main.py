@@ -3,6 +3,7 @@ import threading
 import base64
 import numpy as np
 import cv2
+import boto3
 
 import rclpy
 from rclpy.node import Node
@@ -312,12 +313,73 @@ def ros_spin_thread():
         node.destroy_node()
         rclpy.shutdown()
 
+async def continuous_aws_sync():
+    """Polls AWS DynamoDB at regular intervals to sync attendees to the local robot"""
+    print("[AWS DB SYNC] Start continuous background sync")
+    
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    table = dynamodb.Table('Attendees')
+    
+    is_first_sync = True
+    synced_aws_keys = set()
+    
+    while True:
+        try:
+            # table.scan() is blocking, so we run it in a thread to keep FastAPI fast
+            response = await asyncio.to_thread(table.scan)
+            items = response.get('Items', [])
+            
+            with faceAPI._lock:
+                if faceAPI._db is not None:
+                    # clear local cache on first boot
+                    if is_first_sync:
+                        faceAPI._db.embeddings = np.empty((0, 512), dtype=np.float32)
+                        faceAPI._db.labels = []
+                        is_first_sync = False
+                        
+                    db_changed=False
+                    current_aws_keys={item['Name'] for item in items}
+
+                    delete_keys=synced_aws_keys-current_aws_keys
+                    delete_base_names={k.rsplit('-',1)[0] for k in delete_keys}
+                    
+                    for base_name in delete_base_names:
+                        faceAPI._db.remove(base_name)
+                        print(f"[AWS DB SYNC] deleted user from local memory: {base_name}")
+                        db_changed=True
+                    
+                    for hanging_key in delete_keys:
+                        synced_aws_keys.remove(hanging_key)
+
+                    for item in items:
+                        aws_key = item['Name']
+                        if aws_key not in synced_aws_keys:
+                            # strip suffix to obtain name
+                            base_name = aws_key.rsplit('-', 1)[0]
+                            # convert AWS decimals back to standard floats
+                            embedding = [float(x) for x in item['Embedding']]
+                            faceAPI._db.add(base_name, embedding)
+                            synced_aws_keys.add(aws_key)
+                            db_changed = True
+                            print(f"[AWS DB SYNC] Downloaded new embedding: {aws_key}")
+                            
+                    if db_changed:
+                        faceAPI._db.save()
+                        print("[AWS DB SYNC] Local face_db.pkl updated")
+                        
+        except Exception as e:
+            print(f"[AWS DB SYNC] Error! Failed to pull from AWS: {e}")
+            
+        # Wait 10 seconds before sync
+        await asyncio.sleep(10)
+
 # start node in background when FastAPI boots
 @app.on_event("startup")
 async def startup_event():
     global main_loop
     main_loop = asyncio.get_running_loop()
     threading.Thread(target=ros_spin_thread, daemon=True).start()
+    asyncio.create_task(continuous_aws_sync())
 
 if __name__ == "__main__":
     import uvicorn
