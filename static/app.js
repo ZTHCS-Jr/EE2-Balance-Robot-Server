@@ -75,6 +75,8 @@
       last_angular: 0,
     });
     const [mapSrc, setMapSrc]=React.useState(null);
+    const [autonomyState, setAutonomyState] = React.useState("idle"); // "idle" | "mapping" | "seeking"
+    const [autonomyError, setAutonomyError] = React.useState("");
 
     const joystickRef = React.useRef(null);
     const wsRef = React.useRef(null);
@@ -85,6 +87,7 @@
     const latestRef = React.useRef({ x: 0, y: 0 });
     const sendTimerRef = React.useRef(null);
     const reconnectRef = React.useRef({ timer: null, attempts: 0 });
+    const autonomyRef = React.useRef("idle");  // mirror of autonomyState for the joystick closure
 
     const sendPayload = React.useCallback((payload) => {
       const ws = wsRef.current;
@@ -170,6 +173,10 @@
             else if (payload.type === "map"){
               setMapSrc(payload.image);
             }
+            else if (payload.type === "autonomy") {
+              setAutonomyState(payload.state || "idle");
+              setAutonomyError(typeof payload.error === "string" ? payload.error : "");
+            }
           } catch (error) {
             return;
           }
@@ -215,11 +222,13 @@
       });
 
       const sendLatest = () => {
+        if (autonomyRef.current !== "idle") return;   // joystick locked while autonomy runs
         const { x, y } = latestRef.current;
         sendPayload({ type: "joystick", x, y });
       };
 
       const startSending = () => {
+        if (autonomyRef.current !== "idle") return;    // joystick locked while autonomy runs
         if (sendTimerRef.current) {
           return;
         }
@@ -263,6 +272,20 @@
       }, 1000);
       return () => window.clearInterval(interval);
     }, []);
+
+    // Keep the joystick closure's view of autonomy current, and when autonomy turns on,
+    // stop any active command stream and clear the last vector so nothing stale is sent
+    // when it later releases.
+    React.useEffect(() => {
+      autonomyRef.current = autonomyState;
+      if (autonomyState !== "idle") {
+        if (sendTimerRef.current) {
+          clearInterval(sendTimerRef.current);
+          sendTimerRef.current = null;
+        }
+        latestRef.current = { x: 0, y: 0 };
+      }
+    }, [autonomyState]);
 
     // Start / stop the laptop webcam stream when the Face Recognition tab is active.
     React.useEffect(() => {
@@ -626,6 +649,45 @@
 
     const stageContent = e(React.Fragment, null, visionView, slamView, telemetryView);
 
+    const autonomyActive = autonomyState !== "idle";
+    const autonomyControls = e(
+      "div",
+      { className: "autonomy-controls" },
+      autonomyActive
+        ? e(
+            "button",
+            {
+              type: "button",
+              className: "autonomy-button stop",
+              onClick: () => sendPayload({ type: "autonomy", mode: "stop" }),
+            },
+            autonomyState === "mapping" ? "Stop Mapping" : "Stop Face Seeking"
+          )
+        : e(
+            React.Fragment,
+            null,
+            e(
+              "button",
+              {
+                type: "button",
+                className: "autonomy-button",
+                onClick: () => sendPayload({ type: "autonomy", mode: "map" }),
+              },
+              "Start Mapping"
+            ),
+            e(
+              "button",
+              {
+                type: "button",
+                className: "autonomy-button",
+                onClick: () => sendPayload({ type: "autonomy", mode: "seek" }),
+              },
+              "Start Face Seeking"
+            )
+          ),
+      autonomyError ? e("div", { className: "autonomy-error" }, autonomyError) : null
+    );
+
     return e(
       "div",
       { className: "app" },
@@ -669,11 +731,21 @@
           { className: "panel-card" },
           e("h2", null, "Control Panel"),
           e("p", { className: "panel-muted" }, "Drive control via virtual joystick."),
-          e("div", { className: "joystick-shell" }, e("div", { className: "joystick-zone", ref: joystickRef })),
+          e(
+            "div",
+            { className: "joystick-shell" },
+            e("div", { className: autonomyActive ? "joystick-zone locked" : "joystick-zone", ref: joystickRef }),
+            autonomyActive ? e("div", { className: "joystick-lock-hint" }, "Locked — autonomy running") : null
+          ),
+          autonomyControls,
           e(
             "div",
             { className: "panel-footer" },
-            joystickStatus === "ready"
+            autonomyActive
+              ? autonomyState === "mapping"
+                ? "Autonomous mapping active."
+                : "Face seeking active."
+              : joystickStatus === "ready"
               ? "Release the stick to stop."
               : joystickStatus === "loading"
               ? "Loading joystick..."

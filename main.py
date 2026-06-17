@@ -11,6 +11,7 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
 from visualization_msgs.msg import MarkerArray
+from std_srvs.srv import SetBool
 
 import asyncio
 import json
@@ -135,10 +136,58 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# Autonomy control: the web buttons toggle the ROS enable services on the node below.
+autonomy_state = "idle"   # "idle" | "mapping" | "seeking"
+autonomy_node = None      # MapSubscriber instance; set once ros_spin_thread starts
+
+
+async def handle_autonomy(mode) -> None:
+    """Map a UI autonomy button to the /explore/enable and /seek/enable services.
+
+    Mapping and seeking both drive /cmd_vel, so they are mutually exclusive: starting
+    one disables the other. 'stop' disables both."""
+    global autonomy_state
+    if mode not in ("map", "seek", "stop"):
+        return
+
+    node = autonomy_node
+    if node is None:
+        await manager.broadcast_to_ui(json.dumps(
+            {"type": "autonomy", "state": autonomy_state, "error": "ROS not ready"}))
+        return
+
+    if mode == "map":
+        if not node.explore_ready():
+            await manager.broadcast_to_ui(json.dumps(
+                {"type": "autonomy", "state": "idle", "error": "explorer not running"}))
+            return
+        node.set_seek(False)
+        node.set_explore(True)
+        autonomy_state = "mapping"
+    elif mode == "seek":
+        if not node.seek_ready():
+            await manager.broadcast_to_ui(json.dumps(
+                {"type": "autonomy", "state": "idle", "error": "face seeker not running"}))
+            return
+        node.set_explore(False)
+        node.set_seek(True)
+        autonomy_state = "seeking"
+    else:  # stop
+        node.set_explore(False)
+        node.set_seek(False)
+        autonomy_state = "idle"
+
+    await manager.broadcast_to_ui(json.dumps({"type": "autonomy", "state": autonomy_state}))
+
 
 @app.websocket("/ws/ui")
 async def websocket_ui(websocket: WebSocket) -> None:
     await manager.add_ui(websocket)
+    # Sync the new client's buttons / joystick-lock to the current autonomy state.
+    try:
+        await websocket.send_text(json.dumps({"type": "autonomy", "state": autonomy_state}))
+    except Exception:
+        pass
     try:
         while True:
             raw = await websocket.receive_text()
@@ -147,7 +196,17 @@ async def websocket_ui(websocket: WebSocket) -> None:
             except json.JSONDecodeError:
                 continue
 
-            if payload.get("type") != "joystick":
+            ptype = payload.get("type")
+
+            if ptype == "autonomy":
+                await handle_autonomy(payload.get("mode"))
+                continue
+
+            if ptype != "joystick":
+                continue
+
+            # Joystick is locked while autonomy is running (don't fight /cmd_vel).
+            if autonomy_state != "idle":
                 continue
 
             try:
@@ -271,6 +330,36 @@ class MapSubscriber(Node):
         self.base_map_bgr = None
         self.map_info = None
 
+        # Autonomy enable services (toggled by the web dashboard buttons).
+        self.explore_cli = self.create_client(SetBool, '/explore/enable')
+        self.seek_cli = self.create_client(SetBool, '/seek/enable')
+
+    def explore_ready(self) -> bool:
+        return self.explore_cli.service_is_ready()
+
+    def seek_ready(self) -> bool:
+        return self.seek_cli.service_is_ready()
+
+    def _set_enable(self, cli, value: bool) -> None:
+        req = SetBool.Request()
+        req.data = bool(value)
+        future = cli.call_async(req)
+
+        def _done(fut):
+            try:
+                resp = fut.result()
+                self.get_logger().info(f"[autonomy] enable={value}: ok={resp.success} {resp.message}")
+            except Exception as exc:
+                self.get_logger().warning(f"[autonomy] service call failed: {exc}")
+
+        future.add_done_callback(_done)
+
+    def set_explore(self, value: bool) -> None:
+        self._set_enable(self.explore_cli, value)
+
+    def set_seek(self, value: bool) -> None:
+        self._set_enable(self.seek_cli, value)
+
     def marker_callback(self, msg):
         self.latest_markers = msg.markers
         # print to FastAPI terminal when face is found
@@ -352,8 +441,10 @@ class MapSubscriber(Node):
             )
 
 def ros_spin_thread():
+    global autonomy_node
     rclpy.init()
     node = MapSubscriber()
+    autonomy_node = node
     try:
         rclpy.spin(node)
     except Exception as e:
