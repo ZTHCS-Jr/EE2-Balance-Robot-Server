@@ -4,11 +4,13 @@ import base64
 import numpy as np
 import cv2
 import boto3
+import os
+import getpass
 
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
-
+from visualization_msgs.msg import MarkerArray
 
 import asyncio
 import json
@@ -110,6 +112,7 @@ class ConnectionManager:
             async with self._lock:
                 for websocket in dead:
                     self._ui_clients.discard(websocket)
+                    
     async def broadcast_bytes_to_ui(self, frame_bytes: bytes) -> None:
         async with self._lock:
             targets = list(self._ui_clients)
@@ -120,7 +123,6 @@ class ConnectionManager:
         dead = []
         for websocket in targets:
             try:
-                # Send as binary frame directly to the browser
                 await websocket.send_bytes(frame_bytes)
             except Exception:
                 dead.append(websocket)
@@ -214,14 +216,10 @@ async def _run_detection(frame_bytes: bytes, frame_idx: int, busy_flag: list) ->
     global _detect_logged_once
     try:
         faces = await asyncio.to_thread(faceAPI.detect, frame_bytes)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[face_api] detect failed: {exc}")
         busy_flag[0] = False
         return
-    finally:
-        # Always clear the flag, even if broadcast below raises, so detection
-        # keeps firing on subsequent frames.
-        pass
     if not _detect_logged_once:
         print(f"[face_api] first detection complete: {len(faces)} face(s) on frame {frame_idx}")
         _detect_logged_once = True
@@ -266,29 +264,80 @@ main_loop = None
 class MapSubscriber(Node):
     def __init__(self):
         super().__init__('web_map_subscriber')
-        # subscribe to map topic
         self.subscription = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        self.marker_sub = self.create_subscription(MarkerArray, '/people_markers', self.marker_callback, 10)
+        
+        self.latest_markers = []
+        self.base_map_bgr = None
+        self.map_info = None
+
+    def marker_callback(self, msg):
+        self.latest_markers = msg.markers
+        # print to FastAPI terminal when face is found
+        print(f"[Web UI] Received {len(self.latest_markers)} markers") 
+        self.render_and_broadcast()
 
     def map_callback(self, msg):
-        # connvert the ROS array to a 2D numpy array
         data = np.array(msg.data, dtype=np.int8)
         width, height = msg.info.width, msg.info.height
+        self.map_info = msg.info
         grid = data.reshape((height, width))
-
-        # Map values to greyscale colors
-        # -1 (Unknown) -> 127 (Grey)
-        # 0 (Free Space) -> 255 (White)
-        # 100 (Wall/Occupied) -> 0 (Black)
         img = np.zeros((height, width), dtype=np.uint8)
         img[grid == -1] = 127
         img[grid == 0] = 255
         img[grid == 100] = 0
+        img_color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        self.base_map_bgr = cv2.flip(img_color, 0)
+        self.render_and_broadcast()
 
-        # orientate SLAM map
-        img = cv2.flip(img, 0)
+    def render_and_broadcast(self):
+        if self.base_map_bgr is None or self.map_info is None:
+            return
+        display_img = self.base_map_bgr.copy()
+        
+        try:
+            width = self.map_info.width
+            height = self.map_info.height
+            resolution = self.map_info.resolution
+            origin_x = self.map_info.origin.position.x
+            origin_y = self.map_info.origin.position.y
+            dynamic_scale_factor = max(1.0, (max(width, height) * 0.003))
 
-        # compress into a PNG
-        _, buffer = cv2.imencode('.png', img)
+            for marker in self.latest_markers:
+                mx = marker.pose.position.x
+                my = marker.pose.position.y
+                
+                gx = int((mx - origin_x) / resolution)
+                gy = int((my - origin_y) / resolution)
+                gy_flipped = height - 1 - gy
+
+                if 0 <= gx < width and 0 <= gy_flipped < height:
+                    b = int(marker.color.b * 255)
+                    g = int(marker.color.g * 255)
+                    r = int(marker.color.r * 255)
+                    color = (b, g, r)
+
+                    if marker.type == 2:  # circle
+                        base_radius = int((marker.scale.x / 2.0) / resolution)
+                        radius = int(max(2 * dynamic_scale_factor, base_radius))
+                        cv2.circle(display_img, (gx, gy_flipped), radius, color, -1)
+                        cv2.circle(display_img, (gx, gy_flipped), radius, (0, 0, 0), max(1, int(1 * dynamic_scale_factor)))
+
+                    elif marker.type == 9:  # text
+                        text = marker.text or "Unknown"
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        scale = 0.25 * dynamic_scale_factor  
+                        thickness = max(1, int(1 * dynamic_scale_factor))
+                        (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+                        tx = gx - tw // 2
+                        ty = gy_flipped - 8
+                        
+                        cv2.rectangle(display_img, (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2), (0, 0, 0), -1)
+                        cv2.putText(display_img, text, (tx, ty), font, scale, color, thickness)
+        except Exception as e:
+            print(f"[Web UI] Error drawing markers: {e}")
+
+        _, buffer = cv2.imencode('.png', display_img)
         b64_str = base64.b64encode(buffer).decode('utf-8')
 
         payload = {
@@ -314,66 +363,73 @@ def ros_spin_thread():
         rclpy.shutdown()
 
 async def continuous_aws_sync():
-    """Polls AWS DynamoDB at regular intervals to sync attendees to the local robot"""
-    print("[AWS DB SYNC] Start continuous background sync")
+    """Polls AWS DynamoDB at regular intervals with forced hardcoded fallback."""
+    print("[AWS DB SYNC] Starting continuous background sync...")
     
-    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-    table = dynamodb.Table('Attendees')
-    
+    FORCED_KEY = "ASIAR5WSNIN245QIJ2NF"
+    FORCED_SECRET = "y4C0+3JynBHSocxFRHXSN9KhYx46u4J/CBvrbd9E"
+    FORCED_TOKEN = "IQoJb3JpZ2luX2VjELX//////////wEaCXVzLXdlc3QtMiJHMEUCID7Ip4QBM29NRiLYmHHLWXEF1oA3rKiwmMkHyQs+PjT3AiEApDAfslm6m83qk2z4nkPJcaBNE4f7V9WnKQvSc4zg/v4qtAIIfhAAGgwxMzI1MTE1MTU1MDkiDPgJqo+q1oSqAvoESSqRAoJ/DHwa0Tppz53T0CNj3rPxChVcB0KFO8MbbG1aUTV4rFheWQN02UIXV0yXjLLKUP8G5aNJHc/DtTo/TzAwilvDJssyhksParmIQFuDswS+Wy++VfrPfTkdlw0Sor+d0sib2eXGRuT2gtxjVFNnbifWVN+yxypG154UmuyeTIyICaVLcGIMMSMXxGEx6day9uEKZDhBSi0uUP8t1IKCHfnIJK4Vqj0IXahdA4cnRav2N1ol/716yBlAfPlGZ2CYbX7EvO5HZaQzNvYLW7FD5h5OAtJQHf9j0RDkWLT3VhJ6TLUOmE/mnrTLcHQSz88hh6zHFaKXRG3Z0dP3LAlBWC+PJhcxx615ExgAejDMc8p3eDCK98bRBjqdAb/0Yv4mSHo15KfU0Ih1s2WNo4rtKPbVgh1wR3R608phdIH/SGJwuYy5eVPKCcTENh0XpPvfObqukdR4ZN+UGtbxWtSaXVWt+HpLoCREGXQiet5opED5YLkxsqBFsBAR66ER2FdQq1fsJZSsSkbDeLmD6gYGnv/6oz4gwJAfQWlM6uHueM/6Ql4rqANmOAQPreTeKw3S4GqVqz2RZUw="
+
     is_first_sync = True
     synced_aws_keys = set()
     
     while True:
         try:
-            # table.scan() is blocking, so we run it in a thread to keep FastAPI fast
+            # use hardcoded strings directly
+            dynamodb = boto3.resource(
+                'dynamodb',
+                region_name='us-east-1',
+                aws_access_key_id=FORCED_KEY,
+                aws_secret_access_key=FORCED_SECRET,
+                aws_session_token=FORCED_TOKEN
+            )
+                
+            table = dynamodb.Table('Attendees')
+            
+            # Fetch data off thread
             response = await asyncio.to_thread(table.scan)
             items = response.get('Items', [])
             
             with faceAPI._lock:
                 if faceAPI._db is not None:
-                    # clear local cache on first boot
                     if is_first_sync:
                         faceAPI._db.embeddings = np.empty((0, 512), dtype=np.float32)
                         faceAPI._db.labels = []
                         is_first_sync = False
                         
-                    db_changed=False
-                    current_aws_keys={item['Name'] for item in items}
+                    db_changed = False
+                    current_aws_keys = {item['Name'] for item in items}
 
-                    delete_keys=synced_aws_keys-current_aws_keys
-                    delete_base_names={k.rsplit('-',1)[0] for k in delete_keys}
+                    delete_keys = synced_aws_keys - current_aws_keys
+                    delete_base_names = {k.rsplit('-', 1)[0] for k in delete_keys}
                     
                     for base_name in delete_base_names:
                         faceAPI._db.remove(base_name)
-                        print(f"[AWS DB SYNC] deleted user from local memory: {base_name}")
-                        db_changed=True
+                        print(f"[AWS DB SYNC] Deleted user from local memory: {base_name}")
+                        db_changed = True
                     
                     for hanging_key in delete_keys:
                         synced_aws_keys.remove(hanging_key)
 
                     for item in items:
-                        aws_key = item['Name']
-                        if aws_key not in synced_aws_keys:
-                            # strip suffix to obtain name
-                            base_name = aws_key.rsplit('-', 1)[0]
-                            # convert AWS decimals back to standard floats
+                        aws_key_name = item['Name']
+                        if aws_key_name not in synced_aws_keys:
+                            base_name = aws_key_name.rsplit('-', 1)[0]
                             embedding = [float(x) for x in item['Embedding']]
                             faceAPI._db.add(base_name, embedding)
-                            synced_aws_keys.add(aws_key)
+                            synced_aws_keys.add(aws_key_name)
                             db_changed = True
-                            print(f"[AWS DB SYNC] Downloaded new embedding: {aws_key}")
+                            print(f"[AWS DB SYNC] Downloaded new embedding: {aws_key_name}")
                             
                     if db_changed:
                         faceAPI._db.save()
-                        print("[AWS DB SYNC] Local face_db.pkl updated")
+                        print("[AWS DB SYNC] Local face_db.pkl updated successfully")
                         
         except Exception as e:
-            print(f"[AWS DB SYNC] Error! Failed to pull from AWS: {e}")
+            print(f"[AWS DB SYNC] Error, failed to pull from AWS: {e}")
             
-        # Wait 10 seconds before sync
         await asyncio.sleep(10)
 
-# start node in background when FastAPI boots
 @app.on_event("startup")
 async def startup_event():
     global main_loop
