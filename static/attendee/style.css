@@ -193,3 +193,26 @@ body {
   height: 100% !important;
   object-fit: contain;
 }
+
+.input-group select {
+  font-family: inherit;
+  font-size: 15px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #f9fafb;
+  color: var(--text);
+  transition: border-color 0.2s;
+  cursor: pointer;
+}
+
+.input-group select:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: #ffffff;
+}
+
+.input-group select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

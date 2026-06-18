@@ -27,6 +27,7 @@ app = FastAPI(title="Robot Registration MVP")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+user_languages={}
 
 @app.get("/")
 async def index() -> FileResponse:
@@ -216,6 +217,13 @@ async def _run_detection(frame_bytes: bytes, frame_idx: int, busy_flag: list) ->
     global _detect_logged_once
     try:
         faces = await asyncio.to_thread(faceAPI.detect, frame_bytes)
+        for face in faces:
+            name = face.get('name')
+            if name and name!="Unknown":
+                face['language']=user_languages.get(name, "English")
+            else:
+                face['language']="English"
+
     except Exception as exc:
         print(f"[face_api] detect failed: {exc}")
         busy_flag[0] = False
@@ -270,29 +278,49 @@ class MapSubscriber(Node):
         self.latest_markers = []
         self.base_map_bgr = None
         self.map_info = None
+        
+        self.PAD_CELLS = 20 
+        self.SCALE = 3 # Triple map resolution for text rendering
 
     def marker_callback(self, msg):
         self.latest_markers = msg.markers
-        # print to FastAPI terminal when face is found
-        print(f"[Web UI] Received {len(self.latest_markers)} markers") 
         self.render_and_broadcast()
 
     def map_callback(self, msg):
         data = np.array(msg.data, dtype=np.int8)
         width, height = msg.info.width, msg.info.height
         self.map_info = msg.info
+
         grid = data.reshape((height, width))
         img = np.zeros((height, width), dtype=np.uint8)
         img[grid == -1] = 127
         img[grid == 0] = 255
         img[grid == 100] = 0
         img_color = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        self.base_map_bgr = cv2.flip(img_color, 0)
+        img_color = cv2.flip(img_color, 0)
+
+        # padding for names
+        padded_img = cv2.copyMakeBorder(
+            img_color, 
+            self.PAD_CELLS, self.PAD_CELLS, self.PAD_CELLS, self.PAD_CELLS, 
+            cv2.BORDER_CONSTANT, value=(127, 127, 127)
+        )
+
+        # upscale resolution 3x
+        new_h, new_w = padded_img.shape[:2]
+        high_res_map = cv2.resize(
+            padded_img, 
+            (new_w * self.SCALE, new_h * self.SCALE), 
+            interpolation=cv2.INTER_NEAREST
+        )
+
+        self.base_map_bgr = high_res_map
         self.render_and_broadcast()
 
     def render_and_broadcast(self):
         if self.base_map_bgr is None or self.map_info is None:
             return
+
         display_img = self.base_map_bgr.copy()
         
         try:
@@ -301,39 +329,57 @@ class MapSubscriber(Node):
             resolution = self.map_info.resolution
             origin_x = self.map_info.origin.position.x
             origin_y = self.map_info.origin.position.y
-            dynamic_scale_factor = max(1.0, (max(width, height) * 0.003))
 
             for marker in self.latest_markers:
                 mx = marker.pose.position.x
                 my = marker.pose.position.y
                 
-                gx = int((mx - origin_x) / resolution)
-                gy = int((my - origin_y) / resolution)
-                gy_flipped = height - 1 - gy
+                # raw cell coordinates
+                gx_raw = (mx - origin_x) / resolution
+                gy_raw = (my - origin_y) / resolution
+                
+                # shift by padding
+                gx_padded = gx_raw + self.PAD_CELLS
+                gy_padded = gy_raw + self.PAD_CELLS
+                
+                # apply the Y-Flip (accounting for the new padded height)
+                padded_height = height + (2 * self.PAD_CELLS)
+                gy_flipped = padded_height - 1 - gy_padded
+                
+                # multiply by our 3x Scale to get high-res pixel target
+                gx = int(gx_padded * self.SCALE)
+                gy = int(gy_flipped * self.SCALE)
 
-                if 0 <= gx < width and 0 <= gy_flipped < height:
+                # Safe bounds checking
+                img_h, img_w = display_img.shape[:2]
+                if 0 <= gx < img_w and 0 <= gy < img_h:
                     b = int(marker.color.b * 255)
                     g = int(marker.color.g * 255)
                     r = int(marker.color.r * 255)
                     color = (b, g, r)
 
-                    if marker.type == 2:  # circle
-                        base_radius = int((marker.scale.x / 2.0) / resolution)
-                        radius = int(max(2 * dynamic_scale_factor, base_radius))
-                        cv2.circle(display_img, (gx, gy_flipped), radius, color, -1)
-                        cv2.circle(display_img, (gx, gy_flipped), radius, (0, 0, 0), max(1, int(1 * dynamic_scale_factor)))
+                    if marker.type == 2:  # SPHERE
+                        # Radius scales perfectly with the high-res map
+                        base_radius_cells = (marker.scale.x / 2.0) / resolution
+                        radius = int(base_radius_cells * self.SCALE)
+                        radius = max(2, radius)
+                        
+                        cv2.circle(display_img, (gx, gy), radius, color, -1)
+                        cv2.circle(display_img, (gx, gy), radius, (0, 0, 0), 2)
 
-                    elif marker.type == 9:  # text
+                    elif marker.type == 9:  # TEXT
                         text = marker.text or "Unknown"
                         font = cv2.FONT_HERSHEY_SIMPLEX
-                        scale = 0.25 * dynamic_scale_factor  
-                        thickness = max(1, int(1 * dynamic_scale_factor))
+                        scale = 0.3
+                        thickness = 1
+                        
                         (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
                         tx = gx - tw // 2
-                        ty = gy_flipped - 8
+                        ty = gy - 12 
                         
                         cv2.rectangle(display_img, (tx - 2, ty - th - 2), (tx + tw + 2, ty + 2), (0, 0, 0), -1)
-                        cv2.putText(display_img, text, (tx, ty), font, scale, color, thickness)
+                        cv2.putText(display_img, text, (tx, ty), font, scale, color, thickness, cv2.LINE_AA)
+                        
         except Exception as e:
             print(f"[Web UI] Error drawing markers: {e}")
 
@@ -363,19 +409,19 @@ def ros_spin_thread():
         rclpy.shutdown()
 
 async def continuous_aws_sync():
-    """Polls AWS DynamoDB at regular intervals with forced hardcoded fallback."""
-    print("[AWS DB SYNC] Starting continuous background sync...")
+    """Polls AWS DynamoDB at regular intervals with forced hardcoded fallback"""
+    print("[AWS DB SYNC] Starting continuous background sync")
     
-    FORCED_KEY = "ASIAR5WSNIN245QIJ2NF"
-    FORCED_SECRET = "y4C0+3JynBHSocxFRHXSN9KhYx46u4J/CBvrbd9E"
-    FORCED_TOKEN = "IQoJb3JpZ2luX2VjELX//////////wEaCXVzLXdlc3QtMiJHMEUCID7Ip4QBM29NRiLYmHHLWXEF1oA3rKiwmMkHyQs+PjT3AiEApDAfslm6m83qk2z4nkPJcaBNE4f7V9WnKQvSc4zg/v4qtAIIfhAAGgwxMzI1MTE1MTU1MDkiDPgJqo+q1oSqAvoESSqRAoJ/DHwa0Tppz53T0CNj3rPxChVcB0KFO8MbbG1aUTV4rFheWQN02UIXV0yXjLLKUP8G5aNJHc/DtTo/TzAwilvDJssyhksParmIQFuDswS+Wy++VfrPfTkdlw0Sor+d0sib2eXGRuT2gtxjVFNnbifWVN+yxypG154UmuyeTIyICaVLcGIMMSMXxGEx6day9uEKZDhBSi0uUP8t1IKCHfnIJK4Vqj0IXahdA4cnRav2N1ol/716yBlAfPlGZ2CYbX7EvO5HZaQzNvYLW7FD5h5OAtJQHf9j0RDkWLT3VhJ6TLUOmE/mnrTLcHQSz88hh6zHFaKXRG3Z0dP3LAlBWC+PJhcxx615ExgAejDMc8p3eDCK98bRBjqdAb/0Yv4mSHo15KfU0Ih1s2WNo4rtKPbVgh1wR3R608phdIH/SGJwuYy5eVPKCcTENh0XpPvfObqukdR4ZN+UGtbxWtSaXVWt+HpLoCREGXQiet5opED5YLkxsqBFsBAR66ER2FdQq1fsJZSsSkbDeLmD6gYGnv/6oz4gwJAfQWlM6uHueM/6Ql4rqANmOAQPreTeKw3S4GqVqz2RZUw="
+    FORCED_KEY = "ASIAR5WSNIN25FU5ABTX"
+    FORCED_SECRET = "OX5mPzfD6kj911vbVuooGisgVS0kEDM5tH6ScLOZ"
+    FORCED_TOKEN = "IQoJb3JpZ2luX2VjENn//////////wEaCXVzLXdlc3QtMiJGMEQCIH2fQrLwPbGx3Sa/lQhpn8AhZjzZUfGbrxZtZWdaDo+XAiBWuPVhzTVbDT5t0k+EnGT8kYrk83v3kz6LITb3NjzoaCq9Agii//////////8BEAAaDDEzMjUxMTUxNTUwOSIMTa3zz0FjOGM9MR1FKpECecNJZzNdz6iCoXO5yJ2A0dZDmgWmYXBEJR+XpIlfexKeFBC2VDVIoHoagWAMXgW+sZxTqebs0oRoEewAAE/skkOVcG7NBQ50pYO2RkBP7eWV0mcqpTBAvyoNra5fkYVeWNQrSBiPMuGPWbiGwi7aW4erEpegeK64slnjh4NdCwcUQW5NgD8sbv8irApY7zVBhXN0+I5ePvSVzwVSBtFGgn4wwxd9xfzo6S2VTsPM7mFE3n6Xp52YWVaiDcNKie4kHsz34wTPcqMpRsIax087QdbuIU6kc15nqWwtTPsE1jlKLbOfnYGkL81Vpq5VYpqBOoZzW3zi4hGkacfGwSWcA4AhaknG31xovfzvGhXI4OtjMPrcztEGOp4B1J6XrVPhmnexg5fGIOI2SSl8NqurCv+mzTmLAnc6Op5Hj6FcrwBmPDSGbjQ7zS+vhziBtiNKD9PcA29F8/g33LZn1blDJGa1UOmvU3CpWsHXnx/BDWDroZDzGB7BmRW2BgVB98a+Cob+H8AWQFHCilEoy9F0y/RAvDcywHO9wiE4QFSvVKuBaW+DXmwtypqTvocO0uZb1uBT/AXBu4U="
 
     is_first_sync = True
     synced_aws_keys = set()
     
     while True:
         try:
-            # use hardcoded strings directly
+            # use hardcoded strings
             dynamodb = boto3.resource(
                 'dynamodb',
                 region_name='us-east-1',
@@ -405,6 +451,7 @@ async def continuous_aws_sync():
                     
                     for base_name in delete_base_names:
                         faceAPI._db.remove(base_name)
+                        user_languages.pop(base_name,None)
                         print(f"[AWS DB SYNC] Deleted user from local memory: {base_name}")
                         db_changed = True
                     
@@ -418,6 +465,7 @@ async def continuous_aws_sync():
                             embedding = [float(x) for x in item['Embedding']]
                             faceAPI._db.add(base_name, embedding)
                             synced_aws_keys.add(aws_key_name)
+                            user_languages[base_name]=item.get('Language', 'English')
                             db_changed = True
                             print(f"[AWS DB SYNC] Downloaded new embedding: {aws_key_name}")
                             

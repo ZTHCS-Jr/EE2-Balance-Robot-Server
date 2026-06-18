@@ -11,6 +11,7 @@
     const [activeTab, setActiveTab] = React.useState("map"); 
     const [mapSrc, setMapSrc] = React.useState(null);
     const [name, setName] = React.useState("");
+    const [language, setLanguage]=React.useState("English");
     const [status, setStatus] = React.useState("idle"); 
     const [errorMessage, setErrorMessage] = React.useState("");
     const [step, setStep] = React.useState(0);
@@ -114,7 +115,8 @@
           },
           body: JSON.stringify({
             name: uniqueName,
-            image: base64Image
+            image: base64Image,
+            language: language
           })
         });
 
@@ -202,7 +204,6 @@
       );
     }
 
-    // TAB 2: REGISTRATION CAMERA
     const currentAngle = ANGLES[step];
     return e("div", { className: "auth-card" },
       renderTabs(),
@@ -221,6 +222,22 @@
           placeholder: "e.g. Alice Smith",
           disabled: status === "loading" || step > 0,
         })
+      ),
+
+      e("div", { className: "input-group" },
+        e("label", { htmlFor: "langInput" }, "Preferred Greeting Language"),
+        e("select", {
+          id: "langInput",
+          value: language,
+          onChange: (ev) => setLanguage(ev.target.value),
+          disabled: status === "loading" || step > 0,
+        }, 
+          e("option", { value: "English" }, "English"),
+          e("option", { value: "Greek" }, "Greek"),
+          e("option", { value: "French" }, "French"),
+          e("option", { value: "Mandarin" }, "Mandarin"),
+          e("option", { value: "Japanese" }, "Japanese")
+        )
       ),
 
       e("div", { className: "video-wrapper" },
